@@ -17,6 +17,13 @@
     一時期、章全体を1つの<p>に<br/>でまとめる方式を試したが、
     Apple Books実機でのページ送り時に行の高さがそろわず崩れる不具合が
     確認されたため元の<p>単位の方式に戻している。
+
+    なろう側の1行(段落)が長文の場合に、Apple Books実機で本文の一部が
+    表示から欠落する不具合を確認した(生成したXHTML自体には文字列が
+    存在するため、キャッシュJSON・epubcheckでの検証だけでは気づけない)。
+    1つの<p>要素が長い縦書きコラムを何個もまたぐことが原因と推測し、
+    _split_long_paragraph() で文末(。！？)ごとに複数の<p>へ分割する
+    ことで、1つの<p>が過度に長くならないようにした。
 """
 from __future__ import annotations
 
@@ -44,6 +51,8 @@ _DIGIT_RUN_RE = re.compile(r"[0-9]{1,4}")
 _TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
 _IMG_TAG_RE = re.compile(r'<img src="([^"]*)" alt="([^"]*)"/>')
 _BR_TAG_RE = re.compile(r"<br\s*/?>")
+_SENTENCE_END_CHARS = "。！？"
+_MAX_PARAGRAPH_LEN = 40
 
 
 def _is_blank_paragraph(text: str) -> bool:
@@ -151,6 +160,44 @@ def _combine_digits(text: str, vertical: bool, already_html: bool = False) -> st
     return "".join(parts)
 
 
+def _split_long_paragraph(html: str, max_len: int = _MAX_PARAGRAPH_LEN) -> list[str]:
+    """長い段落を文末(。！？)で複数の断片に分割する
+
+    なろうの1行(段落)が非常に長い場合、1つの<p>要素だけで縦書きの
+    複数コラムにまたがることになる。Apple Books実機で、そのような
+    長い1つの<p>がコラムをまたぐ際に本文の一部が表示から欠落する
+    (実際にキャッシュJSON・生成XHTMLには文字列が存在するのに、
+    実機の表示だけ一部の文字が抜け落ちる)不具合が確認されたため、
+    文末で複数の<p>に分割してコラムをまたぐ長さを抑える。
+
+    タグ(<ruby>等)の内部にある「。」等は分割点として数えない。
+    """
+    if len(html) <= max_len:
+        return [html]
+
+    segments: list[str] = []
+    buf: list[str] = []
+    in_tag = False
+    visible_len_since_split = 0
+
+    for ch in html:
+        buf.append(ch)
+        if ch == "<":
+            in_tag = True
+        elif ch == ">":
+            in_tag = False
+        if not in_tag:
+            visible_len_since_split += 1
+        if not in_tag and ch in _SENTENCE_END_CHARS and visible_len_since_split >= max_len:
+            segments.append("".join(buf))
+            buf = []
+            visible_len_since_split = 0
+
+    if buf:
+        segments.append("".join(buf))
+    return segments or [html]
+
+
 def _paragraphs_to_html(
     paragraphs: list[str],
     vertical: bool,
@@ -163,6 +210,10 @@ def _paragraphs_to_html(
     行ごとに<p>を分ける方式を採用している。1つの巨大な<p>に<br/>で
     まとめる方式は、Apple Booksの実機でページ送り時の行の高さがそろわず
     崩れる不具合が確認されたため採用していない。
+
+    さらに、なろう側の1行が非常に長い場合は _split_long_paragraph() で
+    文末ごとの複数の<p>に分割する(長い単一<p>がコラムをまたぐ際の
+    Apple Booksでの表示欠落を避けるため)。
     """
     parts = []
     for text in paragraphs:
@@ -173,7 +224,8 @@ def _paragraphs_to_html(
         content = _combine_digits(text, vertical, already_html=already_html)
         if images is not None:
             content = images.process(content)
-        parts.append(f"<p>{content}</p>")
+        for segment in _split_long_paragraph(content):
+            parts.append(f"<p>{segment}</p>")
     return "\n".join(parts)
 
 
