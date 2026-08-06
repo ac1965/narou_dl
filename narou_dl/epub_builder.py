@@ -10,6 +10,13 @@
     v1.0.0  縦書き/横書き切り替え(vertical引数)を含む基本のEPUB生成機能
     v1.1.0  chapter_map引数による章立て対応、ルビ・挿絵の埋め込み対応、
             disk_cache引数によるキャッシュ連携(挿絵の再ダウンロード回避)を追加
+
+修正履歴::
+
+    段落(なろうの行)ごとに独立した<p>要素を生成する方式に変更した。
+    一時期、章全体を1つの<p>に<br/>でまとめる方式を試したが、
+    Apple Books実機でのページ送り時に行の高さがそろわず崩れる不具合が
+    確認されたため元の<p>単位の方式に戻している。
 """
 from __future__ import annotations
 
@@ -93,6 +100,9 @@ p {{
   margin: 0;
   text-indent: {"0" if vertical else "1em"};
 }}
+p.blank {{
+  text-indent: 0;
+}}
 rt {{
   font-size: 0.5em;
 }}
@@ -127,16 +137,31 @@ def _combine_digits(text: str, vertical: bool, already_html: bool = False) -> st
     return "".join(parts)
 
 
-def _paragraphs_to_flow_html(paragraphs: list[str], vertical: bool, already_html: bool = False) -> str:
-    """段落配列を、章全体で1つの流し込みHTML(<br/>区切り)にする"""
-    lines = []
+def _paragraphs_to_html(
+    paragraphs: list[str],
+    vertical: bool,
+    already_html: bool = False,
+    images: "_ImageEmbedder | None" = None,
+) -> str:
+    """段落配列を、段落(なろうの行)ごとに独立した<p>要素のHTMLにする
+
+    でんでんコンバーターなど実績のある縦書きEPUB生成ツールと同様、
+    行ごとに<p>を分ける方式を採用している。1つの巨大な<p>に<br/>で
+    まとめる方式は、Apple Booksの実機でページ送り時の行の高さがそろわず
+    崩れる不具合が確認されたため採用していない。
+    """
+    parts = []
     for text in paragraphs:
         stripped = text.strip("\u3000 \t\r\n")
         if not stripped:
-            lines.append("")
-        else:
-            lines.append(_combine_digits(text, vertical, already_html=already_html))
-    return "<br/>\n".join(lines)
+            # 空行も1つの<p>として残し、全角スペースで最低限の高さを持たせる
+            parts.append('<p class="blank">\u3000</p>')
+            continue
+        content = _combine_digits(text, vertical, already_html=already_html)
+        if images is not None:
+            content = images.process(content)
+        parts.append(f"<p>{content}</p>")
+    return "\n".join(parts)
 
 
 class _ImageEmbedder:
@@ -286,7 +311,7 @@ def build_epub(
             content=(
                 f"<h1>{escape(info.title)}</h1>"
                 f"<p>作者: {escape(info.writer)}</p>"
-                f"<p>{_paragraphs_to_flow_html(info.story.splitlines(), vertical)}</p>"
+                f"{_paragraphs_to_html(info.story.splitlines(), vertical)}"
             ),
             direction=direction,
         )
@@ -317,8 +342,8 @@ def build_epub(
             last_chapter_title = chapter_title
 
         file_name = f"episode_{ep.index:04d}.xhtml"
-        body_html = images.process(_paragraphs_to_flow_html(ep.paragraphs, vertical, already_html=True))
-        content = f"<h1>{_combine_digits(ep.subtitle, vertical)}</h1>\n<p>{body_html}</p>"
+        body_html = _paragraphs_to_html(ep.paragraphs, vertical, already_html=True, images=images)
+        content = f"<h1>{_combine_digits(ep.subtitle, vertical)}</h1>\n{body_html}"
         chapter = epub.EpubHtml(
             title=ep.subtitle or f"第{ep.index}話",
             file_name=file_name,
