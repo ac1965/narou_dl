@@ -24,6 +24,13 @@
     v1.0.0  本文取得(fetch_episode)の基本機能
     v1.1.0  本文中のルビ(<ruby>)・挿絵(<img>)タグの保持、
             章立て取得(fetch_chapter_map)を追加
+
+修正履歴::
+
+    前書き(class末尾 --preface)を持つ話で、本文ではなく前書きを誤って
+    取得してしまう不具合を修正した(_find_honbun)。前書き・あとがきも
+    共通の "p-novel__text" クラスを持つため、前書きが本文より先に
+    出現する話では本文が空(または前書きの内容)として取得されていた。
 """
 from __future__ import annotations
 
@@ -122,6 +129,26 @@ class EpisodeScraper:
             return f"{BASE_URL}/{ncode}/"
         return f"{BASE_URL}/{ncode}/{episode_no}/"
 
+    @staticmethod
+    def _find_honbun(soup: BeautifulSoup) -> Tag | None:
+        """ページ内から前書き・あとがきを除いた「本文」divを探す
+
+        なろうのページには前書き(class末尾 --preface)・本文・あとがき
+        (class末尾 --afterword)の最大3つの js-novel-text.p-novel__text
+        要素が同時に存在しうる。前書き・あとがきも "p-novel__text" クラス
+        自体は共通して持つため、単純な `div.js-novel-text.p-novel__text`
+        セレクタでは前書きが先にマッチしてしまい、本文が空だと誤認する
+        (前書き・あとがきが無い話も多いため長らく気づかれなかった不具合)。
+        ここではクラスが過不足なく {"js-novel-text", "p-novel__text"} と
+        一致する要素(前書き・あとがきの修飾クラスを持たないもの)だけを
+        本文として選ぶ。
+        """
+        for candidate in soup.select("div.js-novel-text.p-novel__text"):
+            classes = set(candidate.get("class") or [])
+            if classes == {"js-novel-text", "p-novel__text"}:
+                return candidate
+        return None
+
     def fetch_episode(self, ncode: str, episode_no: int | None) -> Episode:
         """1話分の本文を取得する(ルビ・挿絵タグを保持したまま返す)
 
@@ -141,7 +168,7 @@ class EpisodeScraper:
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        body = soup.select_one("div.js-novel-text.p-novel__text")
+        body = self._find_honbun(soup)
         if body is None:
             raise ScrapeError(
                 f"本文要素が見つかりませんでした (url={url})。"
