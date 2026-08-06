@@ -24,6 +24,16 @@
     1つの<p>要素が長い縦書きコラムを何個もまたぐことが原因と推測し、
     _split_long_paragraph() で文末(。！？)ごとに複数の<p>へ分割する
     ことで、1つの<p>が過度に長くならないようにした。
+
+    Ruby版 narou + AozoraEpub3 の組み合わせでは同じ話でも文字欠落が
+    発生しないとの報告を受け、AozoraEpub3(hmdev/AozoraEpub3)の実装を
+    調査した。決定的な一致は見つけられなかったが、標準のCSSプロパティ
+    break-inside(および互換のpage-break-inside / -webkit-column-
+    break-inside)が本来この種の「要素途中でのコラム分割」を制御する
+    ためのものであるため、p要素に break-inside: avoid を追加した。
+    _split_long_paragraph() による事前分割と併用することで、コラムに
+    収まる長さの段落はできる限り分割されない完全な形でコラム送りされ、
+    それでも長すぎる段落は文末で区切られた比較的短い断片になる。
 """
 from __future__ import annotations
 
@@ -122,6 +132,14 @@ h1.chapter-divider {{
 p {{
   margin: 0;
   text-indent: {"0" if vertical else "1em"};
+  /* 段落の途中でコラム/ページが分割されるのをできるだけ避ける。
+     AozoraEpub3等の実績あるツールの出力と挙動を揃える目的もある。
+     (段落自体がコラムの許容量より長い場合は、ブラウザ側の判断で
+     結局分割されるため、_split_long_paragraph() による事前分割と
+     併用している) */
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
 }}
 p.blank {{
   text-indent: 0;
