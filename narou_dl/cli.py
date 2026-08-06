@@ -11,11 +11,15 @@
     narou-dl N9669BK --refresh            # キャッシュを無視して取り直す
     narou-dl N9669BK --no-cache           # キャッシュを使わない
     narou-dl N9669BK --clear-cache        # この作品のキャッシュを削除してから取得する
+    narou-dl N9669BK --no-update-check    # 改稿の自動検知をせず、キャッシュがあれば常に使う
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
 キャッシュディレクトリは --cache-dir > 環境変数 XDG_CACHE_HOME > カレントディレクトリの
 ./.narou-dl-cache の優先順位で決まる(詳細は cache.py を参照)。
+
+キャッシュ利用時は既定で目次から話ごとの最終更新日時を取得し、なろう側で
+本文が「改稿」された話だけを自動的に再取得する(--no-update-check で無効化可能)。
 
 または pip install せずに直接実行::
 
@@ -26,6 +30,12 @@
     v1.0.0  基本のCLI(ncode指定、-o/--sleep/--start/--end/--yoko)
     v1.1.0  --no-chapters/--no-images/--refresh/--no-cache/--clear-cache/--cache-dir
             オプションを追加(章立て・ルビ・挿絵・ローカルキャッシュ対応に伴う)
+
+修正履歴::
+
+    Ruby版 narou を参考に、話ごとの最終更新日時(改稿検知)による自動的な
+    キャッシュ鮮度チェックを追加した(--no-update-check で従来の
+    「キャッシュがあれば常に使う」挙動に戻せる)。
 """
 from __future__ import annotations
 
@@ -40,7 +50,7 @@ import requests
 from .api import NarouAPI, NarouAPIError, polite_sleep
 from .cache import Cache
 from .epub_builder import build_epub
-from .scraper import Episode, EpisodeScraper, ScrapeError
+from .scraper import Episode, EpisodeScraper, ScrapeError, TocEntry
 
 MAX_RETRIES = 3
 
@@ -66,6 +76,33 @@ def fetch_with_retry(label: str, func, retries: int = MAX_RETRIES):
             time.sleep(wait)
     assert last_exc is not None
     raise last_exc
+
+
+def _load_from_cache_if_fresh(
+    cache: Cache | None,
+    args: argparse.Namespace,
+    toc: dict[int, TocEntry],
+    ep_no: int | None,
+) -> Episode | None:
+    """キャッシュ済みかつ(鮮度チェック対象なら)最新の話だけを返す
+
+    以下のいずれかに該当する場合は None を返し、呼び出し側に再取得させる:
+      - キャッシュ自体が無効、または --refresh 指定時
+      - 短編(ep_no is None、キャッシュ非対応)
+      - キャッシュにその話が無い
+      - 鮮度チェック対象で、目次上の最終更新日時がキャッシュ保存時と異なる
+        (=改稿された可能性がある)
+    """
+    if cache is None or args.refresh or ep_no is None:
+        return None
+    cached_episode = cache.load_episode(ep_no)
+    if cached_episode is None:
+        return None
+    if args.no_update_check or ep_no not in toc:
+        return cached_episode
+    if cache.load_episode_updated_at(ep_no) == toc[ep_no].updated_at:
+        return cached_episode
+    return None  # 改稿の可能性があるため再取得させる
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -118,6 +155,11 @@ def run(argv: list[str] | None = None) -> int:
             "./.narou-dl-cache)"
         ),
     )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="話ごとの改稿自動検知をせず、キャッシュがあれば(--refresh指定時を除き)常に使う",
+    )
     args = parser.parse_args(argv)
 
     cache: Cache | None = None
@@ -145,28 +187,26 @@ def run(argv: list[str] | None = None) -> int:
     print(f"作者: {info.writer}")
     print(f"話数: {info.episode_count}話 ({'短編' if info.is_tanpen else '連載'})")
 
+    # 章立て表示、または改稿検知(鮮度チェック)のために目次が必要かどうか
+    need_toc = not info.is_tanpen and (
+        not args.no_chapters or (cache is not None and not args.no_update_check)
+    )
+    toc: dict[int, TocEntry] = {}
     chapter_map: dict[int, str] = {}
-    if not info.is_tanpen and not args.no_chapters:
-        cached_chapter_map = None if (cache is None or args.refresh) else cache.load_chapter_map(
-            info.general_all_no
-        )
-        if cached_chapter_map is not None:
-            chapter_map = cached_chapter_map
-            print("目次(章立て)をキャッシュから読み込みました。")
-        else:
-            print("目次(章立て)を取得中...")
-            try:
-                chapter_map = fetch_with_retry(
-                    "目次", lambda: scraper.fetch_chapter_map(args.ncode, info.general_all_no)
-                )
-            except (requests.RequestException, ScrapeError) as exc:
-                print(f"  [警告] 目次の取得に失敗したため、章立てなしで続行します: {exc}", file=sys.stderr)
-                chapter_map = {}
-            if cache and chapter_map:
-                cache.save_chapter_map(chapter_map, info.general_all_no)
-        if chapter_map:
-            n_chapters = len(set(chapter_map.values()))
-            print(f"  {n_chapters}章を検出しました。")
+    if need_toc:
+        print("目次を取得中...")
+        try:
+            toc = fetch_with_retry(
+                "目次", lambda: scraper.fetch_toc(args.ncode, info.general_all_no)
+            )
+        except (requests.RequestException, ScrapeError) as exc:
+            print(f"  [警告] 目次の取得に失敗しました: {exc}", file=sys.stderr)
+            toc = {}
+        if not args.no_chapters:
+            chapter_map = {i: e.chapter_title for i, e in toc.items() if e.chapter_title}
+            if chapter_map:
+                n_chapters = len(set(chapter_map.values()))
+                print(f"  {n_chapters}章を検出しました。")
 
     if info.is_tanpen:
         episode_numbers: list[int | None] = [None]
@@ -180,9 +220,7 @@ def run(argv: list[str] | None = None) -> int:
     for i, ep_no in enumerate(episode_numbers, start=1):
         label = f"{ep_no}話" if ep_no else "(短編)"
 
-        cached_episode = (
-            None if (cache is None or args.refresh or ep_no is None) else cache.load_episode(ep_no)
-        )
+        cached_episode = _load_from_cache_if_fresh(cache, args, toc, ep_no)
         if cached_episode is not None:
             print(f"  [{i}/{total}] {label} をキャッシュから読み込みました。")
             episodes.append(cached_episode)
@@ -197,7 +235,8 @@ def run(argv: list[str] | None = None) -> int:
             return 1
         episodes.append(episode)
         if cache:
-            cache.save_episode(episode)
+            updated_at = toc[ep_no].updated_at if ep_no in toc else None
+            cache.save_episode(episode, updated_at=updated_at)
         if i < total:
             polite_sleep(args.sleep)
 

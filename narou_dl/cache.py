@@ -7,19 +7,27 @@
      (典型的には ~/.cache/narou-dl)
   2. それ以外はプロジェクト内(カレントディレクトリ) `./.narou-dl-cache`
 
-作品ごとに以下の構成でキャッシュを持つ:
+作品ごとに以下の構成でキャッシュを持つ::
 
     <cache_dir>/<ncode>/
         info.json           作品メタデータ(参考用。取得のたびに上書きされる)
         chapters.json       章立て(話数->章タイトル)。総話数が変わると無効化される
-        episodes/0001.json  各話の本文(話数ごとに1ファイル)
+        episodes/0001.json  各話の本文(話数ごとに1ファイル。取得時点の
+                             目次上の最終更新日時も併せて保存される)
         images/<hash>       挿絵の実データ(URLのハッシュをファイル名にする)
         images/<hash>.meta  対応するContent-Type
 
 話が「改稿」で更新される場合など、キャッシュが古くなることがあるため、
-明示的に --refresh で無視させることができる。
+明示的に --refresh で無視させることができる。それとは別に、
+scraper.fetch_toc() が返す話ごとの最終更新日時を使って、改稿された話だけを
+自動的に再取得することもできる(cli.py 側の鮮度チェックで利用)。
 
 追加時期: v1.1.0 で新規追加されたモジュール。
+
+修正履歴::
+
+    Ruby版 narou を参考に、話ごとの最終更新日時(改稿検知用)を
+    save_episode/load_episode_updated_at で保存・参照できるようにした。
 """
 from __future__ import annotations
 
@@ -146,24 +154,59 @@ class Cache:
         Returns:
             キャッシュがあれば Episode、なければ(壊れている場合を含む)None。
         """
+        data = self._load_episode_raw(episode_no)
+        if data is None:
+            return None
+        data = dict(data)
+        data.pop("updated_at", None)  # Episode dataclassには無いフィールドなので除く
+        try:
+            return Episode(**data)
+        except TypeError:
+            return None
+
+    def load_episode_updated_at(self, episode_no: int) -> str | None:
+        """キャッシュ済みの話について、保存時点の目次上の最終更新日時を読み込む。
+
+        scraper.fetch_toc() が返す最新の TocEntry.updated_at と比較することで、
+        なろう側で該当話が改稿されたかどうかを判定できる
+        (値が異なる、またはこのメソッドが None を返す場合は要再取得)。
+
+        Args:
+            episode_no: 話数(1始まり)。
+
+        Returns:
+            保存時点の更新日時文字列。キャッシュが無い、または save_episode の
+            呼び出し時に updated_at が渡されていなければ None。
+        """
+        data = self._load_episode_raw(episode_no)
+        if data is None:
+            return None
+        return data.get("updated_at")
+
+    def _load_episode_raw(self, episode_no: int) -> dict | None:
         path = self._episode_path(episode_no)
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return Episode(**data)
-        except (json.JSONDecodeError, TypeError, KeyError):
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
             return None
 
-    def save_episode(self, episode: Episode) -> None:
+    def save_episode(self, episode: Episode, updated_at: str | None = None) -> None:
         """話本文をキャッシュに保存する。
 
         Args:
             episode: 保存する話データ(episode.index がファイル名に使われる)。
+            updated_at: 保存時点の目次上の最終更新日時(scraper.TocEntry.updated_at)。
+                指定しておくと、次回以降 load_episode_updated_at() で読み出し、
+                改稿検知に使える。
         """
         self.episodes_dir.mkdir(parents=True, exist_ok=True)
+        payload = asdict(episode)
+        if updated_at is not None:
+            payload["updated_at"] = updated_at
         self._episode_path(episode.index).write_text(
-            json.dumps(asdict(episode), ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     # --- 挿絵画像 ---

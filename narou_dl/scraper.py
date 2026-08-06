@@ -31,10 +31,22 @@
     取得してしまう不具合を修正した(_find_honbun)。前書き・あとがきも
     共通の "p-novel__text" クラスを持つため、前書きが本文より先に
     出現する話では本文が空(または前書きの内容)として取得されていた。
+
+    Ruby版 narou (https://github.com/whiteleaf7/narou) の
+    webnovel/ncode.syosetu.com.yaml を参考に以下を追加:
+      - fetch_toc(): 章立てに加えて話ごとの最終更新日時(改稿があれば
+        その日時、無ければ初回掲載日時)も取得するようにした
+        (fetch_chapter_map は fetch_toc の薄いラッパーとして存続)。
+        この更新日時はキャッシュの鮮度判定(cache.py)に使われ、
+        なろう側で本文が改稿された話だけを自動的に再取得できるようにする。
+      - 目次の最終ページ番号を、決め打ちの ceil(総話数/100) ではなく
+        ページャーの「最後へ」リンクから動的に検出するようにした
+        (取得できない場合は従来通りの計算にフォールバックする)。
 """
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from html import escape
 from urllib.parse import urljoin
@@ -46,6 +58,7 @@ from .api import USER_AGENT
 
 BASE_URL = "https://ncode.syosetu.com"
 EPISODES_PER_TOC_PAGE = 100
+_LAST_PAGE_RE = re.compile(r"[?&]p=(\d+)")
 
 # 本文中でそのまま残してよいインライン要素(ルビ表記に必要な最小限)
 _INLINE_ALLOWED_TAGS = {"ruby", "rt", "rp"}
@@ -70,6 +83,21 @@ class Episode:
 
 class ScrapeError(RuntimeError):
     """本文または目次ページのHTML構造が想定と異なり、解析できなかった場合の例外。"""
+
+
+@dataclass
+class TocEntry:
+    """目次ページから取得した、話1つ分のメタデータ。"""
+
+    index: int
+    """1始まりの通し話数。"""
+    chapter_title: str | None
+    """所属する章のタイトル。章立てが無い作品では None。"""
+    updated_at: str
+    """最終更新日時の文字列表現(改稿があればその日時、無ければ初回掲載日時)。
+    書式はなろうの表示をそのまま使う(例: "2012/11/22 17:00")。
+    値そのものに意味を持たせず、前回取得時の値と文字列比較して変化の
+    有無を判定する(キャッシュの鮮度判定)ためだけに用いる。"""
 
 
 def _serialize_inline(node) -> str:
@@ -186,6 +214,7 @@ class EpisodeScraper:
         """目次ページを全て取得し、話数(1始まり) -> 章タイトル の対応表を作る
 
         章立てのない(フラットな目次の)作品の場合は空の dict を返す。
+        内部的には fetch_toc() を呼び出す薄いラッパー。
 
         Args:
             ncode: 作品コード。
@@ -198,16 +227,65 @@ class EpisodeScraper:
             ScrapeError: 目次要素が見つからない(サイト構造変更など)場合。
             requests.RequestException: 通信自体に失敗した場合。
         """
-        ncode = ncode.lower()
-        chapter_map: dict[int, str] = {}
-        if total_episodes <= 0:
-            return chapter_map
+        toc = self.fetch_toc(ncode, total_episodes)
+        return {i: e.chapter_title for i, e in toc.items() if e.chapter_title}
 
-        total_pages = max(1, math.ceil(total_episodes / EPISODES_PER_TOC_PAGE))
+    @staticmethod
+    def _detect_last_toc_page(soup: BeautifulSoup) -> int | None:
+        """目次ページャーの「最後へ」リンクから最終ページ番号を検出する
+
+        見つからない場合(目次が1ページのみで、ページャー自体が無い場合
+        など)は None を返す。
+        """
+        last_link = soup.select_one("a.c-pager__item--last")
+        if last_link is None or not last_link.get("href"):
+            return None
+        m = _LAST_PAGE_RE.search(last_link["href"])
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _parse_updated_at(sublist_tag: Tag) -> str:
+        """<div class="p-eplist__sublist"> 1つ分から最終更新日時を取り出す
+
+        改稿がある場合は <span title="YYYY/MM/DD HH:MM 改稿"> の日時を、
+        無ければ初回掲載日時のテキストをそのまま使う。
+        """
+        update_div = sublist_tag.select_one("div.p-eplist__update")
+        if update_div is None:
+            return ""
+        revise_span = update_div.select_one("span[title]")
+        if revise_span is not None and revise_span.get("title"):
+            return revise_span["title"].replace("改稿", "").strip()
+        return update_div.get_text(strip=True)
+
+    def fetch_toc(self, ncode: str, total_episodes: int) -> dict[int, TocEntry]:
+        """目次ページを全て取得し、話数(1始まり) -> TocEntry の対応表を作る
+
+        章タイトルに加えて、話ごとの最終更新日時(改稿検知用)も取得する。
+
+        Args:
+            ncode: 作品コード。
+            total_episodes: 全話数(なろう小説APIの general_all_no)。
+
+        Returns:
+            話数から TocEntry への対応表。
+
+        Raises:
+            ScrapeError: 目次要素が見つからない(サイト構造変更など)場合。
+            requests.RequestException: 通信自体に失敗した場合。
+        """
+        ncode = ncode.lower()
+        toc: dict[int, TocEntry] = {}
+        if total_episodes <= 0:
+            return toc
+
         episode_no = 0
         current_chapter: str | None = None
+        fallback_total_pages = max(1, math.ceil(total_episodes / EPISODES_PER_TOC_PAGE))
+        page = 1
+        last_page: int | None = None
 
-        for page in range(1, total_pages + 1):
+        while True:
             url = f"{BASE_URL}/{ncode}/" if page == 1 else f"{BASE_URL}/{ncode}/?p={page}"
             resp = self.session.get(url, timeout=self.timeout)
             resp.raise_for_status()
@@ -220,6 +298,9 @@ class EpisodeScraper:
                     " サイトのHTML構造が変更された可能性があります。"
                 )
 
+            if page == 1:
+                last_page = self._detect_last_toc_page(soup) or fallback_total_pages
+
             for child in eplist.children:
                 if not isinstance(child, Tag):
                     continue
@@ -228,7 +309,14 @@ class EpisodeScraper:
                     current_chapter = child.get_text(strip=True)
                 elif "p-eplist__sublist" in classes:
                     episode_no += 1
-                    if current_chapter:
-                        chapter_map[episode_no] = current_chapter
+                    toc[episode_no] = TocEntry(
+                        index=episode_no,
+                        chapter_title=current_chapter,
+                        updated_at=self._parse_updated_at(child),
+                    )
 
-        return chapter_map
+            if page >= (last_page or fallback_total_pages):
+                break
+            page += 1
+
+        return toc
