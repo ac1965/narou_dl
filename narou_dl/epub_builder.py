@@ -43,6 +43,20 @@ FONT_FAMILY = (
 _DIGIT_RUN_RE = re.compile(r"[0-9]{1,4}")
 _TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
 _IMG_TAG_RE = re.compile(r'<img src="([^"]*)" alt="([^"]*)"/>')
+_BR_TAG_RE = re.compile(r"<br\s*/?>")
+
+
+def _is_blank_paragraph(text: str) -> bool:
+    """段落が実質的に空行かどうかを判定する
+
+    scraper側で "" に正規化されるのが正しいが、過去にキャッシュされた
+    データ(scraper修正前に取得したもの)には <br/> のみを含む文字列が
+    そのまま残っている場合がある。ここでも <br/> タグを除去したうえで
+    判定することで、そうした古いキャッシュに対しても正しく空行として
+    扱えるようにしている。
+    """
+    without_br = _BR_TAG_RE.sub("", text)
+    return not without_br.strip("\u3000 \t\r\n")
 
 
 def _build_css(vertical: bool) -> str:
@@ -152,8 +166,7 @@ def _paragraphs_to_html(
     """
     parts = []
     for text in paragraphs:
-        stripped = text.strip("\u3000 \t\r\n")
-        if not stripped:
+        if _is_blank_paragraph(text):
             # 空行も1つの<p>として残し、全角スペースで最低限の高さを持たせる
             parts.append('<p class="blank">\u3000</p>')
             continue

@@ -92,6 +92,14 @@ def _serialize_inline(node) -> str:
 
 
 def _serialize_paragraph(p_tag: Tag) -> str:
+    """<p>タグ1つ分を安全なHTML文字列にする
+
+    なろうの空行は <p><br/></p> のように「<br/>のみを含むp」で表現される
+    ことがある。この場合、実際のテキストが無い(空行である)ことを示すため
+    空文字列 "" を返す(呼び出し側は "" を空行として扱う)。
+    """
+    if not p_tag.get_text(strip=True):
+        return ""
     return "".join(_serialize_inline(c) for c in p_tag.contents)
 
 
