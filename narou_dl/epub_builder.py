@@ -27,13 +27,26 @@
 
     Ruby版 narou + AozoraEpub3 の組み合わせでは同じ話でも文字欠落が
     発生しないとの報告を受け、AozoraEpub3(hmdev/AozoraEpub3)の実装を
-    調査した。決定的な一致は見つけられなかったが、標準のCSSプロパティ
-    break-inside(および互換のpage-break-inside / -webkit-column-
-    break-inside)が本来この種の「要素途中でのコラム分割」を制御する
-    ためのものであるため、p要素に break-inside: avoid を追加した。
-    _split_long_paragraph() による事前分割と併用することで、コラムに
-    収まる長さの段落はできる限り分割されない完全な形でコラム送りされ、
-    それでも長すぎる段落は文末で区切られた比較的短い断片になる。
+    調査した。当初はGitHub上のソースからは決定的な一致を見つけられず、
+    標準のCSSプロパティ break-inside: avoid を p要素に追加した。
+
+    その後、AozoraEpub3の実際の配布物一式(テンプレートCSS本体)が
+    共有されたため直接確認したところ、実際に使われているpの規則は
+    `p { text-align: justify; margin: 0; }` のみで break-inside 系は
+    一切使われていなかった。break-inside: avoid はむしろ新たな表示崩れ
+    (ブロック末尾が不自然に浮く)を招いていたため削除し、
+    text-align: justify に置き換えた。
+
+    しかし text-align: justify に変更した後も、句読点の位置が前後する
+    (「〜理由だ。」が「。〜理由だ」のように表示される)別の崩れ方が
+    実機で再現した。break-inside の有無やtext-alignの指定内容を
+    変えるたびに崩れ方が変わるだけで解消しないことから、原因は
+    個別のCSSプロパティではなく「1つの<p>が複数の縦書きコラムに
+    またがること」自体にあると判断した。_split_long_paragraph() の
+    閾値を1コラムに収まる目安(24文字、実測で1コラムあたり約26文字)
+    まで下げ、文末が見つからないまま長くなりすぎた場合は文の途中でも
+    強制的に分割するようにして、1つの<p>が複数コラムにまたがる状況
+    自体をできる限り作らないようにした。
 """
 from __future__ import annotations
 
@@ -62,7 +75,7 @@ _TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
 _IMG_TAG_RE = re.compile(r'<img src="([^"]*)" alt="([^"]*)"/>')
 _BR_TAG_RE = re.compile(r"<br\s*/?>")
 _SENTENCE_END_CHARS = "。！？"
-_MAX_PARAGRAPH_LEN = 40
+_MAX_PARAGRAPH_LEN = 24
 
 
 def _is_blank_paragraph(text: str) -> bool:
@@ -177,20 +190,30 @@ def _combine_digits(text: str, vertical: bool, already_html: bool = False) -> st
 
 
 def _split_long_paragraph(html: str, max_len: int = _MAX_PARAGRAPH_LEN) -> list[str]:
-    """長い段落を文末(。！？)で複数の断片に分割する
+    """長い段落を、可能な限り1縦書きコラムに収まる長さの複数の<p>に分割する
 
     なろうの1行(段落)が非常に長い場合、1つの<p>要素だけで縦書きの
-    複数コラムにまたがることになる。Apple Books実機で、そのような
-    長い1つの<p>がコラムをまたぐ際に本文の一部が表示から欠落する
-    (実際にキャッシュJSON・生成XHTMLには文字列が存在するのに、
-    実機の表示だけ一部の文字が抜け落ちる)不具合が確認されたため、
-    文末で複数の<p>に分割してコラムをまたぐ長さを抑える。
+    複数コラムにまたがることになる。実機(Apple Books)で、そのような
+    長い1つの<p>が複数コラムにまたがる際に、本文の一部が表示から
+    欠落する・末尾の表示が崩れる・句読点の位置が前後するなど、
+    CSSの調整(break-inside, text-align等)だけでは解決しない複数の
+    表示不具合が確認された。CSSプロパティの選択に依存しない対策として、
+    「1つの<p>が複数コラムにまたがる状況そのもの」を極力作らないよう、
+    文末(。！？)を優先しつつも、文末が見つからないまま長くなりすぎた
+    場合は文の途中であっても強制的に分割する。
 
     タグ(<ruby>等)の内部にある「。」等は分割点として数えない。
+
+    Args:
+        html: 分割対象のHTML文字列(既にエスケープ・タグ付与済み)。
+        max_len: 1断片あたりのおおよその目安文字数(タグを含まない
+            可視文字数)。この2倍を超えても文末が来ない場合は
+            文中でも強制的に分割する。
     """
     if len(html) <= max_len:
         return [html]
 
+    hard_max = max_len + 10  # 文末を多少待つが、コラムを大きく超える前に強制分割する
     segments: list[str] = []
     buf: list[str] = []
     in_tag = False
@@ -204,7 +227,18 @@ def _split_long_paragraph(html: str, max_len: int = _MAX_PARAGRAPH_LEN) -> list[
             in_tag = False
         if not in_tag:
             visible_len_since_split += 1
-        if not in_tag and ch in _SENTENCE_END_CHARS and visible_len_since_split >= max_len:
+
+        if in_tag:
+            continue
+
+        should_split = False
+        if ch in _SENTENCE_END_CHARS and visible_len_since_split >= max_len:
+            should_split = True
+        elif visible_len_since_split >= hard_max:
+            # 文末が見つからないまま長くなりすぎたので文の途中でも分割する
+            should_split = True
+
+        if should_split:
             segments.append("".join(buf))
             buf = []
             visible_len_since_split = 0
