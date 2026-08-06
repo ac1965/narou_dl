@@ -4,6 +4,12 @@
 目次(EPUB nav)も章でネストした構造にする。
 本文中の <ruby> タグ(ルビ)や <img>(挿絵)はそのままEPUBへ埋め込まれる。
 挿絵は参照URLから実際の画像データをダウンロードし、EPUB内部に同梱する。
+
+追加時期::
+
+    v1.0.0  縦書き/横書き切り替え(vertical引数)を含む基本のEPUB生成機能
+    v1.1.0  chapter_map引数による章立て対応、ルビ・挿絵の埋め込み対応、
+            disk_cache引数によるキャッシュ連携(挿絵の再ダウンロード回避)を追加
 """
 from __future__ import annotations
 
@@ -11,12 +17,16 @@ import mimetypes
 import re
 import sys
 from html import escape
+from typing import TYPE_CHECKING
 
 import requests
 from ebooklib import epub
 
 from .api import USER_AGENT, NovelInfo
 from .scraper import Episode
+
+if TYPE_CHECKING:
+    from .cache import Cache
 
 FONT_FAMILY = (
     '"Hiragino Mincho ProN", "Hiragino Mincho Pro", "Yu Mincho", '
@@ -130,15 +140,26 @@ def _paragraphs_to_flow_html(paragraphs: list[str], vertical: bool, already_html
 
 
 class _ImageEmbedder:
-    """本文HTML中の<img src="URL">を実データに差し替えてEPUBへ同梱するヘルパー"""
+    """本文HTML中の<img src="URL">を実データに差し替えてEPUBへ同梱するヘルパー
 
-    def __init__(self, book: epub.EpubBook, session: requests.Session | None, enabled: bool):
+    disk_cache を渡すと、ダウンロード済みの画像データをディスクに保存し、
+    次回以降の実行では再ダウンロードせずに済ませる。
+    """
+
+    def __init__(
+        self,
+        book: epub.EpubBook,
+        session: requests.Session | None,
+        enabled: bool,
+        disk_cache: "Cache | None" = None,
+    ):
         self.book = book
         self.session = session or requests.Session()
         if session is None:
             self.session.headers["User-Agent"] = USER_AGENT
         self.enabled = enabled
-        self._cache: dict[str, str] = {}  # 元URL -> EPUB内の相対パス("" は失敗)
+        self.disk_cache = disk_cache
+        self._resolved: dict[str, str] = {}  # 元URL -> EPUB内の相対パス("" は失敗)
         self._count = 0
 
     def process(self, html: str) -> str:
@@ -151,35 +172,55 @@ class _ImageEmbedder:
             return ""  # 挿絵埋め込み無効時はタグごと削除する
 
         url, alt = m.group(1), m.group(2)
-        local_path = self._cache.get(url)
+        local_path = self._resolved.get(url)
         if local_path is None:
-            local_path = self._download(url)
-            self._cache[url] = local_path
+            local_path = self._obtain(url)
+            self._resolved[url] = local_path
         if not local_path:
             return ""  # ダウンロード失敗時はタグごと削除する
         return f'<img src="{local_path}" alt="{alt}"/>'
 
-    def _download(self, url: str) -> str:
+    def _obtain(self, url: str) -> str:
+        content: bytes
+        content_type: str
+
+        cached = self.disk_cache.load_image(url) if self.disk_cache else None
+        if cached is not None:
+            content, content_type = cached
+        else:
+            downloaded = self._download(url)
+            if downloaded is None:
+                return ""
+            content, content_type = downloaded
+            if self.disk_cache:
+                self.disk_cache.save_image(url, content, content_type)
+
+        return self._add_to_book(content, content_type)
+
+    def _add_to_book(self, content: bytes, content_type: str) -> str:
+        ext = mimetypes.guess_extension(content_type) or ".jpg"
+        if ext == ".jpe":
+            ext = ".jpg"
+        self._count += 1
+        file_name = f"images/illust_{self._count:04d}{ext}"
+        image_item = epub.EpubImage(
+            uid=f"img{self._count}",
+            file_name=file_name,
+            media_type=content_type,
+            content=content,
+        )
+        self.book.add_item(image_item)
+        return file_name
+
+    def _download(self, url: str) -> tuple[bytes, str] | None:
         try:
             resp = self.session.get(url, timeout=15)
             resp.raise_for_status()
             content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-            ext = mimetypes.guess_extension(content_type) or ".jpg"
-            if ext == ".jpe":
-                ext = ".jpg"
-            self._count += 1
-            file_name = f"images/illust_{self._count:04d}{ext}"
-            image_item = epub.EpubImage(
-                uid=f"img{self._count}",
-                file_name=file_name,
-                media_type=content_type,
-                content=resp.content,
-            )
-            self.book.add_item(image_item)
-            return file_name
+            return resp.content, content_type
         except (requests.RequestException, OSError) as exc:
             print(f"  [警告] 挿絵のダウンロードに失敗しました ({url}): {exc}", file=sys.stderr)
-            return ""
+            return None
 
 
 def build_epub(
@@ -190,20 +231,26 @@ def build_epub(
     chapter_map: dict[int, str] | None = None,
     embed_images: bool = True,
     session: requests.Session | None = None,
+    disk_cache: "Cache | None" = None,
 ) -> None:
     """1冊のEPUBファイルを書き出す
 
     Args:
-        info: 作品メタデータ
-        episodes: 話データのリスト(index順にソート済みであること)
-        output_path: 出力先の.epubファイルパス
-        vertical: True(既定)なら縦書き、False なら横書きで生成する
+        info: 作品メタデータ。
+        episodes: 話データのリスト(index順にソート済みであること)。
+        output_path: 出力先の.epubファイルパス。
+        vertical: True(既定)なら縦書き、False なら横書きで生成する。
         chapter_map: 話数(1始まり) -> 章タイトル の対応表。
             指定すると章の切り替わりに区切りページを挿入し、
             目次(EPUB nav)を章でネストした構造にする。未指定/空ならフラットな目次。
         embed_images: True(既定)なら本文中の挿絵をダウンロードしてEPUBへ同梱する。
             False の場合、挿絵は本文から取り除かれる。
-        session: 挿絵ダウンロードに使うrequests.Session(省略時は新規作成)
+        session: 挿絵ダウンロードに使う requests.Session(省略時は新規作成)。
+        disk_cache: cache.Cache インスタンス。指定するとダウンロード済みの
+            挿絵データをディスクに保存し、次回以降は再ダウンロードしない。
+
+    Returns:
+        None。生成したEPUBは output_path に書き出される。
     """
     chapter_map = chapter_map or {}
 
@@ -224,7 +271,7 @@ def build_epub(
     )
     book.add_item(css_item)
 
-    images = _ImageEmbedder(book, session, embed_images)
+    images = _ImageEmbedder(book, session, embed_images, disk_cache=disk_cache)
 
     spine_items: list = ["nav"]
     toc_entries: list = []

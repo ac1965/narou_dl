@@ -6,3 +6,9 @@ dist/
 *.epub
 .venv/
 venv/
+.narou-dl-cache/
+docs/_build/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

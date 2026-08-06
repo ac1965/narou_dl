@@ -1,15 +1,31 @@
 """コマンドラインエントリポイント
 
-使い方 (インストール後):
+使い方 (インストール後)::
+
     narou-dl N9669BK
     narou-dl N9669BK -o musyoku.epub --sleep 1.5
     narou-dl N9669BK --start 1 --end 20   # 一部の話だけ取得
     narou-dl N9669BK --yoko               # 横書きで生成(既定は縦書き)
     narou-dl N9669BK --no-chapters        # 章立てを無視してフラットな目次にする
     narou-dl N9669BK --no-images          # 挿絵を埋め込まない
+    narou-dl N9669BK --refresh            # キャッシュを無視して取り直す
+    narou-dl N9669BK --no-cache           # キャッシュを使わない
+    narou-dl N9669BK --clear-cache        # この作品のキャッシュを削除してから取得する
 
-または pip install せずに直接実行:
+既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
+同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
+キャッシュディレクトリは --cache-dir > 環境変数 XDG_CACHE_HOME > カレントディレクトリの
+./.narou-dl-cache の優先順位で決まる(詳細は cache.py を参照)。
+
+または pip install せずに直接実行::
+
     python -m narou_dl N9669BK
+
+追加時期::
+
+    v1.0.0  基本のCLI(ncode指定、-o/--sleep/--start/--end/--yoko)
+    v1.1.0  --no-chapters/--no-images/--refresh/--no-cache/--clear-cache/--cache-dir
+            オプションを追加(章立て・ルビ・挿絵・ローカルキャッシュ対応に伴う)
 """
 from __future__ import annotations
 
@@ -17,10 +33,12 @@ import argparse
 import re
 import sys
 import time
+from pathlib import Path
 
 import requests
 
 from .api import NarouAPI, NarouAPIError, polite_sleep
+from .cache import Cache
 from .epub_builder import build_epub
 from .scraper import Episode, EpisodeScraper, ScrapeError
 
@@ -51,6 +69,15 @@ def fetch_with_retry(label: str, func, retries: int = MAX_RETRIES):
 
 
 def run(argv: list[str] | None = None) -> int:
+    """CLIのエントリポイント本体(引数解析からEPUB書き出しまで)。
+
+    Args:
+        argv: コマンドライン引数のリスト。省略時は sys.argv から取得される
+            (argparseの既定動作)。
+
+    Returns:
+        終了コード。成功時は0、失敗時は1。
+    """
     parser = argparse.ArgumentParser(
         description="小説家になろうの作品をダウンロードしてEPUBに変換する"
     )
@@ -74,7 +101,32 @@ def run(argv: list[str] | None = None) -> int:
         action="store_true",
         help="本文中の挿絵をダウンロード・埋め込みせず、取り除く",
     )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="キャッシュを使わず、常にネットワークから取得する"
+    )
+    parser.add_argument(
+        "--refresh", action="store_true", help="キャッシュがあっても無視し、取り直してキャッシュを更新する"
+    )
+    parser.add_argument(
+        "--clear-cache", action="store_true", help="この作品のキャッシュを削除してから取得する"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        help=(
+            "キャッシュの保存先ディレクトリ (既定: 環境変数 XDG_CACHE_HOME が設定されて"
+            "いれば $XDG_CACHE_HOME/narou-dl、未設定ならカレントディレクトリの "
+            "./.narou-dl-cache)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    cache: Cache | None = None
+    if not args.no_cache:
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        cache = Cache(args.ncode, cache_dir=cache_dir)
+        if args.clear_cache:
+            cache.clear()
+            print("キャッシュを削除しました。")
 
     session = requests.Session()
     api = NarouAPI(session=session)
@@ -86,6 +138,8 @@ def run(argv: list[str] | None = None) -> int:
     except (NarouAPIError, requests.RequestException) as exc:
         print(f"[エラー] 作品情報の取得に失敗しました: {exc}", file=sys.stderr)
         return 1
+    if cache:
+        cache.save_info(info)
 
     print(f"タイトル: {info.title}")
     print(f"作者: {info.writer}")
@@ -93,14 +147,23 @@ def run(argv: list[str] | None = None) -> int:
 
     chapter_map: dict[int, str] = {}
     if not info.is_tanpen and not args.no_chapters:
-        print("目次(章立て)を取得中...")
-        try:
-            chapter_map = fetch_with_retry(
-                "目次", lambda: scraper.fetch_chapter_map(args.ncode, info.general_all_no)
-            )
-        except (requests.RequestException, ScrapeError) as exc:
-            print(f"  [警告] 目次の取得に失敗したため、章立てなしで続行します: {exc}", file=sys.stderr)
-            chapter_map = {}
+        cached_chapter_map = None if (cache is None or args.refresh) else cache.load_chapter_map(
+            info.general_all_no
+        )
+        if cached_chapter_map is not None:
+            chapter_map = cached_chapter_map
+            print("目次(章立て)をキャッシュから読み込みました。")
+        else:
+            print("目次(章立て)を取得中...")
+            try:
+                chapter_map = fetch_with_retry(
+                    "目次", lambda: scraper.fetch_chapter_map(args.ncode, info.general_all_no)
+                )
+            except (requests.RequestException, ScrapeError) as exc:
+                print(f"  [警告] 目次の取得に失敗したため、章立てなしで続行します: {exc}", file=sys.stderr)
+                chapter_map = {}
+            if cache and chapter_map:
+                cache.save_chapter_map(chapter_map, info.general_all_no)
         if chapter_map:
             n_chapters = len(set(chapter_map.values()))
             print(f"  {n_chapters}章を検出しました。")
@@ -113,8 +176,19 @@ def run(argv: list[str] | None = None) -> int:
 
     episodes: list[Episode] = []
     total = len(episode_numbers)
+    cache_hits = 0
     for i, ep_no in enumerate(episode_numbers, start=1):
         label = f"{ep_no}話" if ep_no else "(短編)"
+
+        cached_episode = (
+            None if (cache is None or args.refresh or ep_no is None) else cache.load_episode(ep_no)
+        )
+        if cached_episode is not None:
+            print(f"  [{i}/{total}] {label} をキャッシュから読み込みました。")
+            episodes.append(cached_episode)
+            cache_hits += 1
+            continue
+
         print(f"  [{i}/{total}] {label} を取得中...")
         try:
             episode = fetch_with_retry(label, lambda: scraper.fetch_episode(args.ncode, ep_no))
@@ -122,8 +196,13 @@ def run(argv: list[str] | None = None) -> int:
             print(f"[エラー] {label} の取得に失敗しました: {exc}", file=sys.stderr)
             return 1
         episodes.append(episode)
+        if cache:
+            cache.save_episode(episode)
         if i < total:
             polite_sleep(args.sleep)
+
+    if cache_hits:
+        print(f"({cache_hits}/{total}話をキャッシュから読み込みました)")
 
     output_path = args.output or f"{sanitize_filename(info.title)}.epub"
     print(f"EPUBを生成中... ({'横書き' if args.yoko else '縦書き'}) -> {output_path}")
@@ -135,6 +214,7 @@ def run(argv: list[str] | None = None) -> int:
         chapter_map=chapter_map,
         embed_images=not args.no_images,
         session=session,
+        disk_cache=cache,
     )
     print("完了しました。")
     return 0

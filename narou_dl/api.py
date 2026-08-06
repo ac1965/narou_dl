@@ -21,32 +21,55 @@ USER_AGENT = (
 
 @dataclass
 class NovelInfo:
+    """なろう小説APIから取得した作品メタデータ。"""
+
     ncode: str
+    """作品コード(例: "n9669bk")。"""
     title: str
+    """作品タイトル。"""
     writer: str
+    """作者名。"""
     story: str
-    general_all_no: int  # 全掲載話数。0の場合は短編(1話のみ、URLに話数が付かない)
-    novel_type: int      # 1: 連載, 2: 短編
-    end: int             # 1: 完結, 0: 連載中
+    """あらすじ。"""
+    general_all_no: int
+    """全掲載話数。0の場合は短編(1話のみ、URLに話数が付かない)。"""
+    novel_type: int
+    """1なら連載、2なら短編。"""
+    end: int
+    """1なら完結、0なら連載中。"""
 
     @property
     def is_tanpen(self) -> bool:
-        """短編(1話完結・URLに話数が付かない)かどうか"""
+        """短編(1話完結・URLに話数が付かない)かどうか。
+
+        Returns:
+            短編なら True、連載なら False。
+        """
         return self.novel_type == 2 or self.general_all_no == 0
 
     @property
     def episode_count(self) -> int:
+        """実際にダウンロード対象となる話数。
+
+        Returns:
+            短編の場合は常に1。連載の場合は general_all_no。
+        """
         return 1 if self.is_tanpen else self.general_all_no
 
 
 class NarouAPIError(RuntimeError):
-    pass
+    """なろう小説APIの応答が不正、または該当作品が見つからない場合に送出される例外。"""
 
 
 class NarouAPI:
     """なろう小説APIへのアクセスをまとめたクライアント"""
 
     def __init__(self, session: requests.Session | None = None, timeout: float = 10.0):
+        """
+        Args:
+            session: 使い回す requests.Session。省略時は新規作成する。
+            timeout: リクエストのタイムアウト秒数。
+        """
         self.session = session or requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
         self.timeout = timeout
@@ -56,6 +79,13 @@ class NarouAPI:
 
         Args:
             ncode: 作品コード(例: "n9669bk")。大文字小文字どちらでも可。
+
+        Returns:
+            取得した作品メタデータ。
+
+        Raises:
+            NarouAPIError: 作品が見つからない、または応答が不正な場合。
+            requests.RequestException: 通信自体に失敗した場合。
         """
         params = {
             "ncode": ncode,
@@ -84,5 +114,9 @@ class NarouAPI:
 
 
 def polite_sleep(seconds: float = 1.0) -> None:
-    """サーバー負荷軽減のための待機。テストではモックしてよい。"""
+    """サーバー負荷軽減のための待機。テストではモックしてよい。
+
+    Args:
+        seconds: 待機する秒数。
+    """
     time.sleep(seconds)

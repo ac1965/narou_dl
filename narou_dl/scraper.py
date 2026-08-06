@@ -1,22 +1,29 @@
 """ncode.syosetu.com から各話の本文・目次(章立て)を取得するスクレイパー。
 
-サイト構造:
-  - 連載本文: https://ncode.syosetu.com/{ncode}/{episode_no}/
-  - 短編本文: https://ncode.syosetu.com/{ncode}/
-  - 目次: https://ncode.syosetu.com/{ncode}/  (2ページ目以降は ?p=2 ...)
+サイト構造::
 
-  本文は <div class="js-novel-text p-novel__text"> 内の <p> 要素。
-  サブタイトルは <h1 class="p-novel__title p-novel__title--rensai">。
-  ルビは <ruby>漢字<rp>（</rp><rt>かんじ</rt><rp>）</rp></ruby> の形。
+    連載本文: https://ncode.syosetu.com/{ncode}/{episode_no}/
+    短編本文: https://ncode.syosetu.com/{ncode}/
+    目次:     https://ncode.syosetu.com/{ncode}/  (2ページ目以降は ?p=2 ...)
 
-  目次ページは <div class="p-eplist"> の直下に
-  <div class="p-eplist__chapter-title">章タイトル</div> と
-  <div class="p-eplist__sublist"><a class="p-eplist__subtitle">話タイトル</a>...</div>
-  が出現順に並ぶ。話数(1始まり)と episode の URL 番号は一致する。
-  1ページあたり最大100話。
+    本文は <div class="js-novel-text p-novel__text"> 内の <p> 要素。
+    サブタイトルは <h1 class="p-novel__title p-novel__title--rensai">。
+    ルビは <ruby>漢字<rp>（</rp><rt>かんじ</rt><rp>）</rp></ruby> の形。
+
+    目次ページは <div class="p-eplist"> の直下に
+    <div class="p-eplist__chapter-title">章タイトル</div> と
+    <div class="p-eplist__sublist"><a class="p-eplist__subtitle">話タイトル</a>...</div>
+    が出現順に並ぶ。話数(1始まり)と episode の URL 番号は一致する。
+    1ページあたり最大100話。
 
 サイトのHTML構造は予告なく変更される可能性があるため、要素が見つからない場合は
 分かりやすい例外を投げるようにしている。
+
+追加時期::
+
+    v1.0.0  本文取得(fetch_episode)の基本機能
+    v1.1.0  本文中のルビ(<ruby>)・挿絵(<img>)タグの保持、
+            章立て取得(fetch_chapter_map)を追加
 """
 from __future__ import annotations
 
@@ -42,15 +49,20 @@ _INLINE_UNWRAP_TAGS = {"a"}
 
 @dataclass
 class Episode:
-    index: int           # 1始まりの通し話数
-    subtitle: str         # サブタイトル(話のタイトル)
-    # 段落のHTML断片のリスト(空行は "")。
-    # <ruby>タグを含む場合がある安全なHTML文字列(エスケープ済み)として保持する。
+    """1話分の本文データ。"""
+
+    index: int
+    """1始まりの通し話数。"""
+    subtitle: str
+    """サブタイトル(話のタイトル)。"""
     paragraphs: list[str] = field(default_factory=list)
+    """段落のHTML断片のリスト(空行は空文字列 "")。
+    <ruby>(ルビ)・<img>(挿絵)タグを含む場合がある、安全な
+    (エスケープ済みの)HTML文字列として保持する。"""
 
 
 class ScrapeError(RuntimeError):
-    pass
+    """本文または目次ページのHTML構造が想定と異なり、解析できなかった場合の例外。"""
 
 
 def _serialize_inline(node) -> str:
@@ -84,7 +96,14 @@ def _serialize_paragraph(p_tag: Tag) -> str:
 
 
 class EpisodeScraper:
+    """なろうの本文ページ・目次ページを取得するスクレイパー本体"""
+
     def __init__(self, session: requests.Session | None = None, timeout: float = 10.0):
+        """
+        Args:
+            session: 使い回す requests.Session。省略時は新規作成する。
+            timeout: リクエストのタイムアウト秒数。
+        """
         self.session = session or requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
         self.timeout = timeout
@@ -96,11 +115,18 @@ class EpisodeScraper:
         return f"{BASE_URL}/{ncode}/{episode_no}/"
 
     def fetch_episode(self, ncode: str, episode_no: int | None) -> Episode:
-        """1話分の本文を取得する(ルビは<ruby>タグを保持したまま返す)
+        """1話分の本文を取得する(ルビ・挿絵タグを保持したまま返す)
 
         Args:
-            ncode: 作品コード
+            ncode: 作品コード。
             episode_no: 話数(1始まり)。短編の場合は None を指定する。
+
+        Returns:
+            取得した話データ。
+
+        Raises:
+            ScrapeError: 本文要素が見つからない(サイト構造変更など)場合。
+            requests.RequestException: 通信自体に失敗した場合。
         """
         url = self._episode_url(ncode, episode_no)
         resp = self.session.get(url, timeout=self.timeout)
@@ -127,8 +153,15 @@ class EpisodeScraper:
         章立てのない(フラットな目次の)作品の場合は空の dict を返す。
 
         Args:
-            ncode: 作品コード
-            total_episodes: 全話数(なろう小説APIの general_all_no)
+            ncode: 作品コード。
+            total_episodes: 全話数(なろう小説APIの general_all_no)。
+
+        Returns:
+            話数から章タイトルへの対応表。章立てがなければ空の dict。
+
+        Raises:
+            ScrapeError: 目次要素が見つからない(サイト構造変更など)場合。
+            requests.RequestException: 通信自体に失敗した場合。
         """
         ncode = ncode.lower()
         chapter_map: dict[int, str] = {}
