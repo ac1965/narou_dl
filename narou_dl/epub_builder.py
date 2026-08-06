@@ -132,14 +132,12 @@ h1.chapter-divider {{
 p {{
   margin: 0;
   text-indent: {"0" if vertical else "1em"};
-  /* 段落の途中でコラム/ページが分割されるのをできるだけ避ける。
-     AozoraEpub3等の実績あるツールの出力と挙動を揃える目的もある。
-     (段落自体がコラムの許容量より長い場合は、ブラウザ側の判断で
-     結局分割されるため、_split_long_paragraph() による事前分割と
-     併用している) */
-  break-inside: avoid;
-  -webkit-column-break-inside: avoid;
-  page-break-inside: avoid;
+  /* AozoraEpub3(電書協標準CSS)のp規則に合わせる。break-inside:avoid は
+     電書協標準CSSでは画像(.fit)専用でpには使われておらず、実際に
+     Apple Books実機でブロック末尾の表示が崩れる新たな不具合の原因に
+     なったため削除し、代わりに標準CSSのp規則どおり text-align: justify
+     を指定している(縦書きコラムの均等揃え)。 */
+  text-align: justify;
 }}
 p.blank {{
   text-indent: 0;
