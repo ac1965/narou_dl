@@ -66,7 +66,7 @@ def _build_command(
         # 先頭の挿絵注記を表紙として使う(novelconverter.rb:135 cover_option)
         cmd += ["-c", "0"]
 
-    cmd += ["-dst", str(dst_dir.resolve())]
+    cmd += ["-d", str(dst_dir.resolve())]
 
     if not vertical:
         cmd.append("-hor")  # yokogaki_option(novelconverter.rb:151)
