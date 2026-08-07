@@ -158,6 +158,14 @@ p.blank {{
 rt {{
   font-size: 0.5em;
 }}
+/* なろうの傍点表現(<em class="emphasisDots">)。scraper.py が
+   ルビ・挿絵と同様にこのタグを保持するようになったため、
+   AozoraEpub3が使う電書協標準CSS相当の圏点(ゴマ点)表示に合わせる。 */
+em.emphasisDots {{
+  font-style: normal;
+  -webkit-text-emphasis-style: sesame;
+  text-emphasis-style: sesame;
+}}
 img {{
   max-width: 100%;
   height: auto;
