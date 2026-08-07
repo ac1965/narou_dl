@@ -15,6 +15,10 @@
     narou-dl N9669BK --backend aozoraepub3 --aozoraepub3-jar /path/to/AozoraEpub3.jar
                                            # 青空文庫記法を経由し、AozoraEpub3(改造版)の
                                            # 組版(傍点・外字・縦中横・画像回り込み等)でEPUB化する
+    export AOZORAEPUB3_JAR=~/.local/share/aozoraepub3/AozoraEpub3.jar
+    narou-dl N9669BK --backend aozoraepub3
+                                           # --aozoraepub3-jar を毎回指定する代わりに
+                                           # 環境変数 AOZORAEPUB3_JAR を使う(.bashrc等に設定推奨)
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
@@ -54,6 +58,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -190,8 +195,11 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--aozoraepub3-jar",
         type=Path,
-        default=None,
-        help="--backend aozoraepub3 使用時に必須。AozoraEpub3(改造版)の.jarへのパス",
+        default=(Path(os.environ["AOZORAEPUB3_JAR"]) if os.environ.get("AOZORAEPUB3_JAR") else None),
+        help=(
+            "--backend aozoraepub3 使用時に必須。AozoraEpub3(改造版)の.jarへのパス。"
+            "未指定時は環境変数 AOZORAEPUB3_JAR を使う"
+        ),
     )
     parser.add_argument(
         "--device",
@@ -201,7 +209,10 @@ def run(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
-        parser.error("--backend aozoraepub3 を指定する場合は --aozoraepub3-jar が必須です")
+        parser.error(
+            "--backend aozoraepub3 を指定する場合は --aozoraepub3-jar "
+            "または環境変数 AOZORAEPUB3_JAR の指定が必須です"
+        )
 
     cache: Cache | None = None
     if not args.no_cache:
