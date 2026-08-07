@@ -98,16 +98,20 @@ def _build_css(vertical: bool) -> str:
   text-orientation: mixed;
   -webkit-text-orientation: mixed;
   -epub-text-orientation: mixed;
-  line-break: strict;
-  word-break: normal;
+  -webkit-line-break: normal;
+  -epub-line-break: normal;
+  -webkit-word-break: normal;
+  -epub-word-break: normal;
   height: 100%;"""
     else:
         writing_mode_block = """
   writing-mode: horizontal-tb;
   -epub-writing-mode: horizontal-tb;
   -webkit-writing-mode: horizontal-tb;
-  line-break: strict;
-  word-break: normal;"""
+  -webkit-line-break: normal;
+  -epub-line-break: normal;
+  -webkit-word-break: normal;
+  -epub-word-break: normal;"""
 
     tcy_rule = (
         """
