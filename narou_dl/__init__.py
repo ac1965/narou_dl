@@ -3,6 +3,11 @@
 縦書き/横書き、章立て、ルビ、挿絵の埋め込み、ローカルキャッシュに対応。
 
 変更履歴:
+    v1.3.1
+        - ebooklibバックエンドのCSSに text-align-last: left を追加。
+          登場人物紹介のようなリーダードット付き短文がjustifyで間延び
+          して表示される不具合を修正(AozoraEpub3の電書協標準CSSに
+          合わせた)。
     v1.3.0
         - --backend 未指定時、環境変数 AOZORAEPUB3_JAR(または --aozoraepub3-jar)
           が設定されていれば aozoraepub3 を自動選択するようにした。
@@ -42,4 +47,4 @@
           (--yoko オプションによる横書き切り替えを含む)
 """
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
