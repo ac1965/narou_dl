@@ -61,7 +61,11 @@ EPISODES_PER_TOC_PAGE = 100
 _LAST_PAGE_RE = re.compile(r"[?&]p=(\d+)")
 
 # 本文中でそのまま残してよいインライン要素(ルビ表記に必要な最小限)
-_INLINE_ALLOWED_TAGS = {"ruby", "rt", "rp"}
+# "em" はなろうの傍点表現(<em class="emphasisDots">)を保持するために追加。
+# aozora.py 側で青空文庫記法(［＃傍点］)に変換する際にのみ意味を持つため、
+# ebooklib バックエンド(直接HTML埋め込み)ではこれまで通り無視してよい。
+_INLINE_ALLOWED_TAGS = {"ruby", "rt", "rp", "em"}
+_BOUTEN_CLASS = "emphasisDots"
 # 中身を素通りさせる(タグ自体は残さない)要素。挿絵は<a>でリンクされて
 # いることが多いため、リンクは剥がして中身(<img>)だけを取り出す。
 _INLINE_UNWRAP_TAGS = {"a"}
@@ -77,8 +81,10 @@ class Episode:
     """サブタイトル(話のタイトル)。"""
     paragraphs: list[str] = field(default_factory=list)
     """段落のHTML断片のリスト(空行は空文字列 "")。
-    <ruby>(ルビ)・<img>(挿絵)タグを含む場合がある、安全な
-    (エスケープ済みの)HTML文字列として保持する。"""
+    <ruby>(ルビ)・<img>(挿絵)・<em class="emphasisDots">(傍点)タグを
+    含む場合がある、安全な(エスケープ済みの)HTML文字列として保持する。
+    ebooklibバックエンドはこれをそのままXHTMLへ、aozoraバックエンドは
+    aozora.py で青空文庫記法へ変換してから利用する(共通の中間表現)。"""
 
 
 class ScrapeError(RuntimeError):
@@ -115,6 +121,15 @@ def _serialize_inline(node) -> str:
             abs_src = urljoin(BASE_URL, src)
             alt = node.get("alt", "挿絵")
             return f'<img src="{escape(abs_src, quote=True)}" alt="{escape(alt, quote=True)}"/>'
+        if node.name == "em":
+            inner = "".join(_serialize_inline(c) for c in node.contents)
+            classes = set(node.get("class") or [])
+            if _BOUTEN_CLASS in classes:
+                # class 属性込みで保持する(aozora.py の em_to_aozora が
+                # class="emphasisDots" の有無で傍点注記に変換するかを判定する)
+                return f'<em class="{_BOUTEN_CLASS}">{inner}</em>'
+            # 傍点以外の<em>は用途不明なため中身のみ抽出する
+            return inner
         if node.name in _INLINE_ALLOWED_TAGS:
             inner = "".join(_serialize_inline(c) for c in node.contents)
             return f"<{node.name}>{inner}</{node.name}>"
