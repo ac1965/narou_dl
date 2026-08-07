@@ -28,6 +28,22 @@ Ruby版 narou の lib/converterbase.rb の enchant_midashi が生成する形式
     - 外字・縦中横は青空文庫記法側で明示する必要が無い
       (AozoraEpub3側が変換後のテキストから自動判定するため、
       このモジュールでは一切関与しない)。
+
+地の文に含まれる｜《》のエスケープについて:
+    なろう作品では｜《》(パイプ・二重山括弧)が装飾的な記号として地の文に
+    そのまま使われることがある(例:「《五龍将》と呼ばれる」)。これらは
+    青空文庫記法のルビ構文の予約文字と衝突するため、エスケープしないと
+    AozoraEpub3側で「ルビ開始文字無し」という警告とともに正しく変換
+    されない(実際に「無職転生」で確認された不具合)。
+
+    AozoraEpub3Converter.java の CharUtils#isEscapedChar によれば、
+    特殊文字の直前に｢※｣が奇数個続く場合はエスケープされた(=リテラルの)
+    文字として扱われる。このモジュールでは、地の文由来の｜《》に対して
+    この方式(直前に※を1つ付与)でエスケープしてから ruby_to_aozora を
+    適用する(escape_literal_chuki_chars → ruby_to_aozora の順)。
+    Ruby版 narou の html.rb は ≪≫ への一時置換 → 外字注記化という
+    2段階の方式を取っているが、AozoraEpub3が直接解釈できる※エスケープの
+    方がシンプルなためこちらを採用した。
 """
 from __future__ import annotations
 
@@ -55,6 +71,17 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 def _strip_tags(text: str) -> str:
     return _TAG_RE.sub("", text)
+
+
+def escape_literal_chuki_chars(text: str) -> str:
+    """地の文由来の｜《》を、AozoraEpub3が解釈できる形でエスケープする
+
+    直前に｢※｣を1つ置くことで「エスケープされた特殊文字」として扱われる
+    (CharUtils#isEscapedChar の実装に基づく)。ruby_to_aozora を適用する
+    *前*に呼び出すこと(このモジュールが後から生成する正規のルビ構文の
+    ｜《》まで誤ってエスケープしてしまわないようにするため)。
+    """
+    return text.replace("｜", "※｜").replace("《", "※《").replace("》", "※》")
 
 
 def ruby_to_aozora(text: str) -> str:
@@ -111,6 +138,7 @@ def paragraph_to_aozora(text: str, image_registry: dict[str, str]) -> str:
     """
     if not text:
         return ""
+    text = escape_literal_chuki_chars(text)  # 地の文の｜《》を先にエスケープ
     text = ruby_to_aozora(text)
     text = em_to_aozora(text)
     text = img_to_aozora(text, image_registry)
@@ -127,11 +155,13 @@ def chapter_heading(title: str) -> str:
     に合わせている。見出しの前に改ページを入れることで、AozoraEpub3側が
     章単位でファイル分割・目次生成する挙動を誘発する。
     """
+    title = escape_literal_chuki_chars(title)
     return f"［＃改ページ］\n［＃３字下げ］［＃中見出し］{title}［＃中見出し終わり］\n"
 
 
 def episode_heading(subtitle: str) -> str:
     """話タイトルの青空文庫注記を生成する(章より1段階小さい見出し)"""
+    subtitle = escape_literal_chuki_chars(subtitle)
     return f"［＃小見出し］{subtitle}［＃小見出し終わり］"
 
 
@@ -148,7 +178,12 @@ def build_novel_text(
     分けて保存するのに対し、AozoraEpub3は1テキストファイルの入力を前提と
     するため、narou_dlでは全話を連結した1ファイルを組み立てる。
     """
-    lines: list[str] = [title, "", author, ""]
+    lines: list[str] = [
+        escape_literal_chuki_chars(title),
+        "",
+        escape_literal_chuki_chars(author),
+        "",
+    ]
     prev_chapter: str | None = None
 
     for ep in episodes:
