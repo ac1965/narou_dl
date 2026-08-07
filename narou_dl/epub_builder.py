@@ -151,6 +151,15 @@ p {{
      なったため削除し、代わりに標準CSSのp規則どおり text-align: justify
      を指定している(縦書きコラムの均等揃え)。 */
   text-align: justify;
+  /* text-align-last を明示していないと、1コラムに収まる短い段落
+     (「・ヘクター……裏社会の親玉」のような登場人物紹介の箇条書き等)
+     まで justify によって引き伸ばされ、リーダードットの間隔が不自然に
+     開いて表示が崩れる。電書協標準CSS(style-reset.css)も全要素に対して
+     text-align-last: left を指定しており、「行末まで均等揃えは今回
+     含めない」という方針が明記されている。これに合わせる。 */
+  text-align-last: left;
+  -webkit-text-align-last: left;
+  -epub-text-align-last: left;
 }}
 p.blank {{
   text-indent: 0;
