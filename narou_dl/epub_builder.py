@@ -74,8 +74,6 @@ _DIGIT_RUN_RE = re.compile(r"[0-9]{1,4}")
 _TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
 _IMG_TAG_RE = re.compile(r'<img src="([^"]*)" alt="([^"]*)"/>')
 _BR_TAG_RE = re.compile(r"<br\s*/?>")
-_SENTENCE_END_CHARS = "。！？"
-_MAX_PARAGRAPH_LEN = 24
 
 
 def _is_blank_paragraph(text: str) -> bool:
@@ -206,65 +204,6 @@ def _combine_digits(text: str, vertical: bool, already_html: bool = False) -> st
     return "".join(parts)
 
 
-def _split_long_paragraph(html: str, max_len: int = _MAX_PARAGRAPH_LEN) -> list[str]:
-    """長い段落を、可能な限り1縦書きコラムに収まる長さの複数の<p>に分割する
-
-    なろうの1行(段落)が非常に長い場合、1つの<p>要素だけで縦書きの
-    複数コラムにまたがることになる。実機(Apple Books)で、そのような
-    長い1つの<p>が複数コラムにまたがる際に、本文の一部が表示から
-    欠落する・末尾の表示が崩れる・句読点の位置が前後するなど、
-    CSSの調整(break-inside, text-align等)だけでは解決しない複数の
-    表示不具合が確認された。CSSプロパティの選択に依存しない対策として、
-    「1つの<p>が複数コラムにまたがる状況そのもの」を極力作らないよう、
-    文末(。！？)を優先しつつも、文末が見つからないまま長くなりすぎた
-    場合は文の途中であっても強制的に分割する。
-
-    タグ(<ruby>等)の内部にある「。」等は分割点として数えない。
-
-    Args:
-        html: 分割対象のHTML文字列(既にエスケープ・タグ付与済み)。
-        max_len: 1断片あたりのおおよその目安文字数(タグを含まない
-            可視文字数)。この2倍を超えても文末が来ない場合は
-            文中でも強制的に分割する。
-    """
-    if len(html) <= max_len:
-        return [html]
-
-    hard_max = max_len + 10  # 文末を多少待つが、コラムを大きく超える前に強制分割する
-    segments: list[str] = []
-    buf: list[str] = []
-    in_tag = False
-    visible_len_since_split = 0
-
-    for ch in html:
-        buf.append(ch)
-        if ch == "<":
-            in_tag = True
-        elif ch == ">":
-            in_tag = False
-        if not in_tag:
-            visible_len_since_split += 1
-
-        if in_tag:
-            continue
-
-        should_split = False
-        if ch in _SENTENCE_END_CHARS and visible_len_since_split >= max_len:
-            should_split = True
-        elif visible_len_since_split >= hard_max:
-            # 文末が見つからないまま長くなりすぎたので文の途中でも分割する
-            should_split = True
-
-        if should_split:
-            segments.append("".join(buf))
-            buf = []
-            visible_len_since_split = 0
-
-    if buf:
-        segments.append("".join(buf))
-    return segments or [html]
-
-
 def _paragraphs_to_html(
     paragraphs: list[str],
     vertical: bool,
@@ -277,10 +216,6 @@ def _paragraphs_to_html(
     行ごとに<p>を分ける方式を採用している。1つの巨大な<p>に<br/>で
     まとめる方式は、Apple Booksの実機でページ送り時の行の高さがそろわず
     崩れる不具合が確認されたため採用していない。
-
-    さらに、なろう側の1行が非常に長い場合は _split_long_paragraph() で
-    文末ごとの複数の<p>に分割する(長い単一<p>がコラムをまたぐ際の
-    Apple Booksでの表示欠落を避けるため)。
     """
     parts = []
     for text in paragraphs:
@@ -291,8 +226,7 @@ def _paragraphs_to_html(
         content = _combine_digits(text, vertical, already_html=already_html)
         if images is not None:
             content = images.process(content)
-        for segment in _split_long_paragraph(content):
-            parts.append(f"<p>{segment}</p>")
+        parts.append(f"<p>{content}</p>")
     return "\n".join(parts)
 
 
