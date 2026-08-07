@@ -3,6 +3,16 @@
 縦書き/横書き、章立て、ルビ、挿絵の埋め込み、ローカルキャッシュに対応。
 
 変更履歴:
+    v1.2.1
+        - --backend aozoraepub3 の出力先オプションのフラグ名を修正
+          (誤: -dst / 正: -d, --dst)。実機のAozoraEpub3.jarで検証済み。
+    v1.2.0
+        - --backend {ebooklib,aozoraepub3} を追加。aozoraepub3 指定時は
+          本文を青空文庫記法に変換し(aozora.py)、AozoraEpub3(改造版)の
+          外部プロセス実行(aozoraepub3_backend.py)でEPUB化する。
+          --aozoraepub3-jar / --device オプションを新設。
+        - なろうの傍点表現(<em class="emphasisDots">)を保持するよう
+          scraper.py を拡張。ebooklibバックエンドにも表示用CSSを追加。
     v1.1.0
         - 章立て(「第一章」などの区切り)への対応を追加 (scraper.fetch_chapter_map,
           epub_builder.build_epub の chapter_map 引数)
@@ -17,4 +27,4 @@
           (--yoko オプションによる横書き切り替えを含む)
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.1"
