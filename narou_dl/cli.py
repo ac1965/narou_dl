@@ -12,6 +12,9 @@
     narou-dl N9669BK --no-cache           # キャッシュを使わない
     narou-dl N9669BK --clear-cache        # この作品のキャッシュを削除してから取得する
     narou-dl N9669BK --no-update-check    # 改稿の自動検知をせず、キャッシュがあれば常に使う
+    narou-dl N9669BK --backend aozoraepub3 --aozoraepub3-jar /path/to/AozoraEpub3.jar
+                                           # 青空文庫記法を経由し、AozoraEpub3(改造版)の
+                                           # 組版(傍点・外字・縦中横・画像回り込み等)でEPUB化する
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
@@ -30,12 +33,23 @@
     v1.0.0  基本のCLI(ncode指定、-o/--sleep/--start/--end/--yoko)
     v1.1.0  --no-chapters/--no-images/--refresh/--no-cache/--clear-cache/--cache-dir
             オプションを追加(章立て・ルビ・挿絵・ローカルキャッシュ対応に伴う)
+    v1.2.0  --backend {ebooklib,aozoraepub3} / --aozoraepub3-jar / --device を追加。
+            aozoraepub3 バックエンドは本文をaozora.pyで青空文庫記法テキストに
+            変換したうえでAozoraEpub3(改造版)の.jarを外部プロセス起動してEPUB化する。
+            AozoraEpub3側の高度な組版(傍点・外字自動判定・縦中横・画像の自動回転や
+            余白除去等)をそのまま利用できる代わりに、JRE(Java 21以降推奨)と
+            AozoraEpub3.jar本体が別途必要になる。
 
 修正履歴::
 
     Ruby版 narou を参考に、話ごとの最終更新日時(改稿検知)による自動的な
     キャッシュ鮮度チェックを追加した(--no-update-check で従来の
     「キャッシュがあれば常に使う」挙動に戻せる)。
+
+    aozoraepub3 バックエンド追加にあたり、scraper.py の
+    _INLINE_ALLOWED_TAGS に "em" を加え、なろうの傍点表現
+    (<em class="emphasisDots">)を保持するようにした。従来の
+    ebooklibバックエンドはこのタグを無視するため挙動に影響しない。
 """
 from __future__ import annotations
 
@@ -48,8 +62,11 @@ from pathlib import Path
 import requests
 
 from .api import NarouAPI, NarouAPIError, polite_sleep
+from .aozora import build_novel_text
+from .aozoraepub3_backend import AozoraEpub3Error, build_epub_via_aozoraepub3
 from .cache import Cache
 from .epub_builder import build_epub
+from .image_fetch import download_images_for_aozora
 from .scraper import Episode, EpisodeScraper, ScrapeError, TocEntry
 
 MAX_RETRIES = 3
@@ -160,7 +177,31 @@ def run(argv: list[str] | None = None) -> int:
         action="store_true",
         help="話ごとの改稿自動検知をせず、キャッシュがあれば(--refresh指定時を除き)常に使う",
     )
+    parser.add_argument(
+        "--backend",
+        choices=["ebooklib", "aozoraepub3"],
+        default="ebooklib",
+        help=(
+            "EPUB化バックエンド。ebooklib(既定)はnarou_dl自身がHTMLを直接EPUB化する。"
+            "aozoraepub3 は本文を青空文庫記法に変換し、AozoraEpub3(改造版)の外部プロセスで"
+            "EPUB化する(傍点・外字・縦中横・画像回り込み等の高度な組版を利用できる)"
+        ),
+    )
+    parser.add_argument(
+        "--aozoraepub3-jar",
+        type=Path,
+        default=None,
+        help="--backend aozoraepub3 使用時に必須。AozoraEpub3(改造版)の.jarへのパス",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="--backend aozoraepub3 使用時のみ有効。AozoraEpub3のデバイス最適化オプション(例: kindle)",
+    )
     args = parser.parse_args(argv)
+
+    if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
+        parser.error("--backend aozoraepub3 を指定する場合は --aozoraepub3-jar が必須です")
 
     cache: Cache | None = None
     if not args.no_cache:
@@ -245,16 +286,55 @@ def run(argv: list[str] | None = None) -> int:
 
     output_path = args.output or f"{sanitize_filename(info.title)}.epub"
     print(f"EPUBを生成中... ({'横書き' if args.yoko else '縦書き'}) -> {output_path}")
-    build_epub(
-        info,
-        episodes,
-        output_path,
-        vertical=not args.yoko,
-        chapter_map=chapter_map,
-        embed_images=not args.no_images,
-        session=session,
-        disk_cache=cache,
-    )
+
+    if args.backend == "aozoraepub3":
+        work_dir = Path(output_path).resolve().parent
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        image_registry: dict[str, str] = {}
+        if not args.no_images:
+            print("  挿絵をダウンロード中(AozoraEpub3向けにファイル保存)...")
+            image_registry = download_images_for_aozora(
+                episodes, work_dir, session=session, disk_cache=cache,
+            )
+
+        novel_text = build_novel_text(
+            info.title, info.writer, episodes, chapter_map, image_registry,
+        )
+        txt_path = Path(output_path).with_suffix(".txt")
+        txt_path.write_text(novel_text, encoding="utf-8")
+
+        try:
+            result = build_epub_via_aozoraepub3(
+                txt_path,
+                args.aozoraepub3_jar,
+                dst_dir=work_dir,
+                vertical=not args.yoko,
+                cover_first_image=not args.no_images,
+                device=args.device,
+            )
+        except AozoraEpub3Error as exc:
+            print(f"[エラー] AozoraEpub3でのEPUB化に失敗しました: {exc}", file=sys.stderr)
+            return 1
+
+        if result.epub_path != Path(output_path):
+            result.epub_path.replace(output_path)
+        if result.warnings:
+            print("  [警告] AozoraEpub3からの警告:")
+            for w in result.warnings:
+                print(f"    {w}")
+    else:
+        build_epub(
+            info,
+            episodes,
+            output_path,
+            vertical=not args.yoko,
+            chapter_map=chapter_map,
+            embed_images=not args.no_images,
+            session=session,
+            disk_cache=cache,
+        )
+
     print("完了しました。")
     return 0
 
