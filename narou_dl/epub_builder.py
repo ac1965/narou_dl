@@ -47,6 +47,15 @@
     まで下げ、文末が見つからないまま長くなりすぎた場合は文の途中でも
     強制的に分割するようにして、1つの<p>が複数コラムにまたがる状況
     自体をできる限り作らないようにした。
+
+    その後、AozoraEpub3のJavaソース一式(AozoraEpub3Converter.java)が
+    共有され、実際の本文出力コード(`out.write("<p>"); out.write(line);
+    out.write("</p>\\n");`)を確認したところ、なろうの1行がどれだけ
+    長くても分割せず1つの<p>としてそのまま出力していることが分かった。
+    つまり「長い<p>を分割する」という対策自体が実装の実態と矛盾して
+    いたため、_split_long_paragraph() を削除し、1行=1<p>という
+    シンプルな方式(AozoraEpub3・でんでんコンバーター等と同じ)に戻した。
+    text-align: justify は実際のAozoraEpub3のCSSと一致するため維持する。
 """
 from __future__ import annotations
 
@@ -226,10 +235,14 @@ def _paragraphs_to_html(
 ) -> str:
     """段落配列を、段落(なろうの行)ごとに独立した<p>要素のHTMLにする
 
-    でんでんコンバーターなど実績のある縦書きEPUB生成ツールと同様、
-    行ごとに<p>を分ける方式を採用している。1つの巨大な<p>に<br/>で
-    まとめる方式は、Apple Booksの実機でページ送り時の行の高さがそろわず
-    崩れる不具合が確認されたため採用していない。
+    でんでんコンバーターやAozoraEpub3など実績のある縦書きEPUB生成ツールと
+    同様、行ごとに1つの<p>を割り当てる方式を採用している(なろうの1行が
+    どれだけ長くても、その行の内容をそのまま1つの<p>として出力する)。
+    実際にAozoraEpub3Converter.javaのソースを確認したところ、同様に
+    1行=1<p>で、行の長さによる分割は行っていないことを確認した。
+
+    1つの巨大な<p>に<br/>でまとめる方式は、Apple Booksの実機でページ
+    送り時の行の高さがそろわず崩れる不具合が確認されたため採用していない。
     """
     parts = []
     for text in paragraphs:
@@ -365,6 +378,17 @@ def build_epub(
     book.set_language("ja")
     book.add_author(info.writer)
 
+    # book.set_direction() は package.opf の page-progression-direction
+    # (ページ送りの方向)のみを制御する。これとは別に、以前は各
+    # EpubHtml(direction=...) で個々のXHTMLの<html>/<body>にdir="rtl"
+    # 属性を設定していたが、この dir 属性はHTML標準の双方向テキスト
+    # (BiDi)制御用であり、縦書き用の属性ではない。AozoraEpub3(電書協
+    # 標準)もdir属性を使わずwriting-mode: vertical-rlのみで縦書きを
+    # 実現しており、narou_dl側がdir="rtl"を余分に付与していたことで
+    # Apple Books実機のBiDiアルゴリズムが介入し、句点(。)が行頭で
+    # 孤立して表示される不具合が起きていた可能性が高いため、
+    # EpubHtml側へのdirection指定は取りやめた(縦書き自体はCSSの
+    # writing-mode: vertical-rlのみで実現される)。
     direction = "rtl" if vertical else "ltr"
     book.set_direction(direction)
 
@@ -378,19 +402,32 @@ def build_epub(
 
     images = _ImageEmbedder(book, session, embed_images, disk_cache=disk_cache)
 
-    spine_items: list = ["nav"]
+    # AozoraEpub3(改造版)の実際の出力と挙動を揃える:
+    #   - タイトル・著者名は book.set_title()/book.add_author() による
+    #     OPFメタデータ(dc:title/dc:creator)としてのみ持たせ、本文側に
+    #     視覚的なタイトルページとしては表示しない
+    #     (AozoraEpub3もdc:title/dc:creatorのみで、視覚的な扉ページは
+    #     生成しないことを実機で確認済み)
+    #   - 目次(nav.xhtml)はEPUB標準のTOC機能(リーダーの目次ボタン)から
+    #     参照される想定とし、spineに含めない(=本を開いて最初に表示
+    #     される「1ページ目」にはしない)。AozoraEpub3の実際のOPFの
+    #     spineにもnavは含まれていないことを確認済み。
+    spine_items: list = []
     toc_entries: list = []
     current_section_chapters: list | None = None
     last_chapter_title: str | None = None
 
     def _add_intro() -> None:
+        # あらすじが無ければページ自体を作らない
+        # (aozora.build_novel_textのstory処理と挙動を揃えている)
+        if not info.story.strip():
+            return
         intro = epub.EpubHtml(
             title="あらすじ",
             file_name="intro.xhtml",
             lang="ja",
             content=(
-                f"<h1>{escape(info.title)}</h1>"
-                f"<p>作者: {escape(info.writer)}</p>"
+                f"<h1>あらすじ</h1>"
                 f"{_paragraphs_to_html(info.story.splitlines(), vertical)}"
             ),
         )
@@ -439,7 +476,37 @@ def build_epub(
 
     book.toc = tuple(toc_entries)
     book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
+
+    # AozoraEpub3(電書協標準)のnav.xhtmlは、目次専用のインラインCSSで
+    # writing-mode:horizontal-tb(目次は横書きの方が読みやすい)と
+    # li{list-style:none}(<ol>使用時にリーダーが自動採番するリスト番号を
+    # 消す)を指定している。narou_dl側にはこの指定が無く、Apple Booksで
+    # 話数(「０　登場人物の紹介」等、既にタイトル文字列に番号を含む)の
+    # 前に、リーダー側が自動付与する余分な番号が二重表示される不具合が
+    # あったため、同様のnav専用CSSを追加した。
+    nav_css_item = epub.EpubItem(
+        uid="nav_style",
+        file_name="style/nav.css",
+        media_type="text/css",
+        content="""html, body {
+  writing-mode: horizontal-tb;
+  -epub-writing-mode: horizontal-tb;
+  -webkit-writing-mode: horizontal-tb;
+}
+ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+li {
+  padding: 0.25em 0 0 0;
+}
+""",
+    )
+    book.add_item(nav_css_item)
+    nav_item = epub.EpubNav()
+    nav_item.add_item(nav_css_item)
+    book.add_item(nav_item)
 
     book.spine = spine_items
 

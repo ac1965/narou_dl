@@ -168,6 +168,7 @@ def episode_heading(subtitle: str) -> str:
 def build_novel_text(
     title: str,
     author: str,
+    story: str,
     episodes: list["Episode"],
     chapter_map: dict[int, str],
     image_registry: dict[str, str],
@@ -177,6 +178,15 @@ def build_novel_text(
     Downloader#sections_download_and_save(narou.rb) が話ごとにファイルを
     分けて保存するのに対し、AozoraEpub3は1テキストファイルの入力を前提と
     するため、narou_dlでは全話を連結した1ファイルを組み立てる。
+
+    story(あらすじ)は、ebooklibバックエンドの_add_intro()が「あらすじ」
+    専用ページを生成しているのと同じ情報を欠落させないために追加した
+    (aozoraバックエンド側にこの処理が無く、あらすじが完全に失われて
+    いた不具合の修正)。BookInfo(AozoraEpub3Converter.java)のタイトル/
+    著者自動検出は「タイトル行、(空行)、著者名行、空行」という並びを
+    前提にしており、あらすじをタイトル・著者のすぐ後ろに続けると
+    自動検出が崩れるため、あらすじの前に見出し(［＃中見出し］あらすじ）
+    を挟んで独立したセクションとして扱われるようにしている。
     """
     lines: list[str] = [
         escape_literal_chuki_chars(title),
@@ -184,6 +194,11 @@ def build_novel_text(
         escape_literal_chuki_chars(author),
         "",
     ]
+    if story.strip():
+        lines.append("［＃中見出し］あらすじ［＃中見出し終わり］")
+        for story_line in story.splitlines():
+            lines.append(escape_literal_chuki_chars(story_line) if story_line else "")
+        lines.append("［＃改ページ］")
     prev_chapter: str | None = None
 
     for ep in episodes:

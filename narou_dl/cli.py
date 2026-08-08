@@ -16,12 +16,9 @@
                                            # 青空文庫記法を経由し、AozoraEpub3(改造版)の
                                            # 組版(傍点・外字・縦中横・画像回り込み等)でEPUB化する
     export AOZORAEPUB3_JAR=~/.local/share/aozoraepub3/AozoraEpub3.jar
-    narou-dl N9669BK
-                                           # AOZORAEPUB3_JAR が設定されていれば
-                                           # --backend を指定しなくても自動的に
-                                           # aozoraepub3 が使われる(v1.3.0〜)
-    narou-dl N9669BK --backend ebooklib   # AOZORAEPUB3_JAR設定済みでも明示的に
-                                           # ebooklibへフォールバックしたい場合
+    narou-dl N9669BK --backend aozoraepub3
+                                           # --aozoraepub3-jar を毎回指定する代わりに
+                                           # 環境変数 AOZORAEPUB3_JAR を使う
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
@@ -188,15 +185,13 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend",
         choices=["ebooklib", "aozoraepub3"],
-        default=None,
+        default="ebooklib",
         help=(
-            "EPUB化バックエンド。未指定時は、環境変数 AOZORAEPUB3_JAR または "
-            "--aozoraepub3-jar が設定されていれば aozoraepub3 を、なければ "
-            "ebooklib を自動選択する。"
-            "ebooklib はnarou_dl自身がHTMLを直接EPUB化する。"
+            "EPUB化バックエンド。既定は ebooklib(narou_dl自身がHTMLを直接EPUB化する)。"
+            "タイトル・著者はOPFメタデータのみに持たせ、目次はEPUB標準のTOC機能経由で"
+            "参照する構成でAozoraEpub3側と揃えてあるため、通常はebooklibで十分な品質になる。"
             "aozoraepub3 は本文を青空文庫記法に変換し、AozoraEpub3(改造版)の外部プロセスで"
-            "EPUB化する(傍点・外字・縦中横・画像回り込み等の高度な組版を利用できる。"
-            "登場人物紹介のようなリーダードット付きリストの整形品質はebooklibより高い)"
+            "EPUB化する(傍点・外字・縦中横・画像回り込み等、より高度な組版が必要な場合に指定する)"
         ),
     )
     parser.add_argument(
@@ -214,12 +209,6 @@ def run(argv: list[str] | None = None) -> int:
         help="--backend aozoraepub3 使用時のみ有効。AozoraEpub3のデバイス最適化オプション(例: kindle)",
     )
     args = parser.parse_args(argv)
-
-    if args.backend is None:
-        # --backend 未指定時は、aozoraepub3-jar が(env var経由も含め)分かって
-        # いれば aozoraepub3 を既定にする。ebooklib は整形品質で劣るため、
-        # jarが使える環境では明示指定なしでもaozoraepub3を優先する。
-        args.backend = "aozoraepub3" if args.aozoraepub3_jar else "ebooklib"
 
     if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
         parser.error(
@@ -323,7 +312,7 @@ def run(argv: list[str] | None = None) -> int:
             )
 
         novel_text = build_novel_text(
-            info.title, info.writer, episodes, chapter_map, image_registry,
+            info.title, info.writer, info.story, episodes, chapter_map, image_registry,
         )
         txt_path = Path(output_path).with_suffix(".txt")
         txt_path.write_text(novel_text, encoding="utf-8")
