@@ -393,7 +393,6 @@ def build_epub(
                 f"<p>作者: {escape(info.writer)}</p>"
                 f"{_paragraphs_to_html(info.story.splitlines(), vertical)}"
             ),
-            direction=direction,
         )
         intro.add_item(css_item)
         book.add_item(intro)
@@ -411,7 +410,6 @@ def build_epub(
                 file_name=f"chapter_{ep.index:04d}.xhtml",
                 lang="ja",
                 content=f'<h1 class="chapter-divider">{escape(chapter_title)}</h1>',
-                direction=direction,
             )
             divider.add_item(css_item)
             book.add_item(divider)
@@ -429,7 +427,6 @@ def build_epub(
             file_name=file_name,
             lang="ja",
             content=content,
-            direction=direction,
         )
         chapter.add_item(css_item)
         book.add_item(chapter)
