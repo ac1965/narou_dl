@@ -102,6 +102,13 @@ def _build_css(vertical: bool) -> str:
   -epub-line-break: normal;
   -webkit-word-break: normal;
   -epub-word-break: normal;
+  /* AozoraEpub3(電書協標準CSS)のbody規則に倣い追加。word-wrapは
+     禁則処理でどうしても収まらない場合の最終手段としての折り返し、
+     hyphensは欧文混在時のハイフネーション制御用だが、電書協標準CSSが
+     bodyに一律指定しているため同様に指定しておく。 */
+  word-wrap: break-word;
+  -webkit-hyphens: auto;
+  -epub-hyphens: auto;
   height: 100%;"""
     else:
         writing_mode_block = """
@@ -111,7 +118,10 @@ def _build_css(vertical: bool) -> str:
   -webkit-line-break: normal;
   -epub-line-break: normal;
   -webkit-word-break: normal;
-  -epub-word-break: normal;"""
+  -epub-word-break: normal;
+  word-wrap: break-word;
+  -webkit-hyphens: auto;
+  -epub-hyphens: auto;"""
 
     tcy_rule = (
         """
