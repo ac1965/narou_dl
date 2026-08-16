@@ -19,6 +19,10 @@
     narou-dl N9669BK --backend aozoraepub3
                                            # --aozoraepub3-jar を毎回指定する代わりに
                                            # 環境変数 AOZORAEPUB3_JAR を使う
+    narou-dl N9669BK --emit-aozora-txt    # ebooklibでEPUBを生成しつつ、同じ話データから
+                                           # 青空文庫記法テキストも書き出す(挿絵注記は既定で含めない)
+    narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images
+                                           # 上記に加え、挿絵をダウンロードして挿絵注記も含める
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
@@ -43,6 +47,14 @@
             AozoraEpub3側の高度な組版(傍点・外字自動判定・縦中横・画像の自動回転や
             余白除去等)をそのまま利用できる代わりに、JRE(Java 21以降推奨)と
             AozoraEpub3.jar本体が別途必要になる。
+    v1.3.0  --emit-aozora-txt / --emit-aozora-txt-images を追加。ebooklibバックエンドで
+            EPUBを生成する際、同じ話データ(Episode.paragraphs)から独立して
+            aozora.build_novel_text()を呼び、青空文庫記法テキストも書き出せるように
+            した(build_epub()自体はaozora記法を経由しないため、この呼び出しは
+            EPUB生成本体とは無関係に追加している)。挿絵注記は既定で含めず、
+            --emit-aozora-txt-images指定時のみdownload_images_for_aozora()で
+            ダウンロードして含める。--backend aozoraepub3 は既定でtxtを生成する
+            ため、--emit-aozora-txt との併用はparser.error()で拒否する。
 
 修正履歴::
 
@@ -208,12 +220,35 @@ def run(argv: list[str] | None = None) -> int:
         default=None,
         help="--backend aozoraepub3 使用時のみ有効。AozoraEpub3のデバイス最適化オプション(例: kindle)",
     )
+    parser.add_argument(
+        "--emit-aozora-txt",
+        action="store_true",
+        help=(
+            "EPUB(ebooklibバックエンド)生成に加え、同じ話データから青空文庫記法の"
+            "テキストファイル(出力ファイル名の拡張子を.txtにしたもの)も書き出す。"
+            "--backend aozoraepub3 とは併用不可(そちらは既定でtxtを生成するため)"
+        ),
+    )
+    parser.add_argument(
+        "--emit-aozora-txt-images",
+        action="store_true",
+        help=(
+            "--emit-aozora-txt 使用時、挿絵もダウンロードして青空文庫記法の"
+            "挿絵注記を含める(既定では挿絵注記は含めない)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
         parser.error(
             "--backend aozoraepub3 を指定する場合は --aozoraepub3-jar "
             "または環境変数 AOZORAEPUB3_JAR の指定が必須です"
+        )
+
+    if args.emit_aozora_txt and args.backend == "aozoraepub3":
+        parser.error(
+            "--emit-aozora-txt は --backend aozoraepub3 と併用できません"
+            "(aozoraepub3 バックエンドは既に青空文庫記法テキストを生成します)"
         )
 
     cache: Cache | None = None
@@ -347,6 +382,22 @@ def run(argv: list[str] | None = None) -> int:
             session=session,
             disk_cache=cache,
         )
+
+        if args.emit_aozora_txt:
+            image_registry: dict[str, str] = {}
+            if args.emit_aozora_txt_images:
+                txt_work_dir = Path(output_path).resolve().parent
+                print("  挿絵をダウンロード中(青空文庫記法テキスト向けにファイル保存)...")
+                image_registry = download_images_for_aozora(
+                    episodes, txt_work_dir, session=session, disk_cache=cache,
+                )
+
+            novel_text = build_novel_text(
+                info.title, info.writer, info.story, episodes, chapter_map, image_registry,
+            )
+            txt_path = Path(output_path).with_suffix(".txt")
+            txt_path.write_text(novel_text, encoding="utf-8")
+            print(f"  青空文庫記法テキストを書き出しました -> {txt_path}")
 
     print("完了しました。")
     return 0
