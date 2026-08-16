@@ -153,7 +153,10 @@ def run(argv: list[str] | None = None) -> int:
         description="小説家になろうの作品をダウンロードしてEPUBに変換する"
     )
     parser.add_argument("ncode", help="作品コード (例: N9669BK)")
-    parser.add_argument("-o", "--output", help="出力ファイル名 (省略時は作品タイトルから自動生成)")
+    parser.add_argument(
+        "-o", "--output",
+        help="出力ファイル名 (省略時は作品タイトルから自動生成。.epub拡張子が無ければ自動付与する)",
+    )
     parser.add_argument(
         "--sleep", type=float, default=1.0, help="各話取得後の待機秒数 (既定: 1.0秒、サーバー負荷軽減のため)"
     )
@@ -332,7 +335,12 @@ def run(argv: list[str] | None = None) -> int:
     if cache_hits:
         print(f"({cache_hits}/{total}話をキャッシュから読み込みました)")
 
-    output_path = args.output or f"{sanitize_filename(info.title)}.epub"
+    if args.output:
+        output_path = args.output
+        if Path(output_path).suffix.lower() != ".epub":
+            output_path += ".epub"
+    else:
+        output_path = f"{sanitize_filename(info.title)}.epub"
     print(f"EPUBを生成中... ({'横書き' if args.yoko else '縦書き'}) -> {output_path}")
 
     if args.backend == "aozoraepub3":

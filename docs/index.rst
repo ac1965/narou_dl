@@ -32,6 +32,30 @@ narou_dl.epub_builder
    :undoc-members:
    :show-inheritance:
 
+narou_dl.aozora
+-----------------
+
+.. automodule:: narou_dl.aozora
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+narou_dl.aozoraepub3_backend
+------------------------------
+
+.. automodule:: narou_dl.aozoraepub3_backend
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+narou_dl.image_fetch
+----------------------
+
+.. automodule:: narou_dl.image_fetch
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 narou_dl.cache
 ---------------
 

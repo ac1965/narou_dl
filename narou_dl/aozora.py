@@ -5,14 +5,14 @@ AozoraEpub3(改造版)をEPUB化バックエンドとして使う際に、その
 と対で使用する)。
 
 変換規則は Ruby版 narou の lib/html.rb (HTML#to_aozora 系のメソッド群) と
-可能な限り同じアルゴリズムに揃えている:
+可能な限り同じアルゴリズムに揃えている::
 
-    html.rb の対応          | このモジュールの対応
-    ------------------------|--------------------------------
-    ruby_to_aozora           | ruby_to_aozora
-    em_to_sesame(傍点)        | em_to_aozora
-    img_to_aozora             | img_to_aozora
-    delete_tag                | strip_remaining_tags
+    html.rb の対応             このモジュールの対応
+    ------------------------   --------------------------------
+    ruby_to_aozora             ruby_to_aozora
+    em_to_sesame(傍点)          em_to_aozora
+    img_to_aozora               img_to_aozora
+    delete_tag                  strip_remaining_tags
 
 なろうの<ruby>には<rb>が省略されている場合がある(ルビ対象の文字列が
 そのままテキストノードとして<rt>の前に置かれる)ため、<rb>の有無どちらの
@@ -78,7 +78,7 @@ def escape_literal_chuki_chars(text: str) -> str:
 
     直前に｢※｣を1つ置くことで「エスケープされた特殊文字」として扱われる
     (CharUtils#isEscapedChar の実装に基づく)。ruby_to_aozora を適用する
-    *前*に呼び出すこと(このモジュールが後から生成する正規のルビ構文の
+    「前」に呼び出すこと(このモジュールが後から生成する正規のルビ構文の
     ｜《》まで誤ってエスケープしてしまわないようにするため)。
     """
     return text.replace("｜", "※｜").replace("《", "※《").replace("》", "※》")

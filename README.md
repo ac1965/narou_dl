@@ -48,10 +48,26 @@ narou-dl N9669BK --clear-cache
 
 # キャッシュを使わない
 narou-dl N9669BK --no-cache
+
+# AozoraEpub3(改造版)を外部プロセスとして使い、より高度な組版でEPUB化する
+# (傍点・外字自動判定・縦中横・画像回り込み等。JRE(Java 21以降推奨)と
+#  AozoraEpub3.jar本体が別途必要)
+narou-dl N9669BK --backend aozoraepub3 --aozoraepub3-jar /path/to/AozoraEpub3.jar
+# --aozoraepub3-jar の代わりに環境変数でも指定できる
+export AOZORAEPUB3_JAR=~/.local/share/aozoraepub3/AozoraEpub3.jar
+narou-dl N9669BK --backend aozoraepub3
+
+# ebooklibでEPUBを生成しつつ、同じ話データから青空文庫記法テキスト(.txt)も書き出す
+# (挿絵注記は既定で含めない。--backend aozoraepub3 とは併用不可)
+narou-dl N9669BK --emit-aozora-txt
+# 挿絵をダウンロードして挿絵注記も含める場合
+narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images
 ```
 
 ncode は作品URL (`https://ncode.syosetu.com/n9669bk/`) の `n9669bk` の部分です。
 大文字・小文字どちらでも指定できます。
+
+`-o` に `.epub` 拡張子を付けずに指定した場合は自動的に付与されます。
 
 ## 仕組み
 
@@ -59,12 +75,20 @@ ncode は作品URL (`https://ncode.syosetu.com/n9669bk/`) の `n9669bk` の部�
 2. **スクレイパー** (`narou_dl/scraper.py`)
    - 各話ページ (`ncode.syosetu.com/{ncode}/{話数}/`) から本文を取得(ルビ`<ruby>`・挿絵`<img>`タグは保持)
    - 目次ページ (`ncode.syosetu.com/{ncode}/`) から章立て(「第一章」などの区切り)を取得
-3. **EPUBビルダー** (`narou_dl/epub_builder.py`) でEPUBを生成
-   - 縦書き(既定): `writing-mode: vertical-rl`、右→左ページ送り、数字の縦中横対応
-   - 横書き(`--yoko`): 通常の横書きレイアウト
-   - 章立てがある作品は章の区切りページを挿入し、目次(EPUB nav)も章でネストする
-   - ルビはそのままEPUBへ埋め込まれ、対応リーダーでふりがなとして表示される
-   - 挿絵(本文中の画像)は実データをダウンロードしてEPUB内に同梱する(`--no-images`で無効化可能)
+3. **EPUB化バックエンド**(`--backend`で選択、既定は`ebooklib`)
+   - `ebooklib`(既定・**EPUBビルダー** `narou_dl/epub_builder.py`): narou_dl自身がHTMLを直接EPUB化する
+     - 縦書き(既定): `writing-mode: vertical-rl`、右→左ページ送り、数字の縦中横対応
+     - 横書き(`--yoko`): 通常の横書きレイアウト
+     - 章立てがある作品は章の区切りページを挿入し、目次(EPUB nav)も章でネストする
+     - ルビはそのままEPUBへ埋め込まれ、対応リーダーでふりがなとして表示される
+     - 挿絵(本文中の画像)は実データをダウンロードしてEPUB内に同梱する(`--no-images`で無効化可能)
+     - `--emit-aozora-txt` を指定すると、EPUBと同じ話データから独立して
+       (**青空文庫記法変換** `narou_dl/aozora.py`)青空文庫記法テキストも書き出せる
+       (`--emit-aozora-txt-images`で挿絵注記も含められる、既定は含めない)
+   - `aozoraepub3`: 本文を(**青空文庫記法変換** `narou_dl/aozora.py`)で青空文庫記法テキストに変換し、
+     AozoraEpub3(改造版、`narou_dl/aozoraepub3_backend.py`)を外部プロセス起動してEPUB化する。
+     傍点・外字自動判定・縦中横・画像の自動回転や余白除去等、より高度な組版が必要な場合に指定する。
+     JRE(Java 21以降推奨)と`AozoraEpub3.jar`本体が別途必要(`--aozoraepub3-jar`または環境変数`AOZORAEPUB3_JAR`で指定)
 4. **キャッシュ** (`narou_dl/cache.py`)
    - 取得した作品メタデータ・本文・章立て・挿絵をキャッシュディレクトリに保存
    - 同じ作品を再度ダウンロードする際は、キャッシュにある話・挿絵はネットワークアクセスなしで再利用する
