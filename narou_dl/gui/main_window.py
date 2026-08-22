@@ -1,19 +1,31 @@
 """narou_dl GUIのメインウィンドウ。
 
 「ダウンロード」タブと「キャッシュ管理」タブを持つ。
+ダウンロードタブは複数ncode(1行1件)の一括ダウンロードに対応し、
+実行中はキャンセルボタンで次の話の境界まで待って中断できる。
+起動時に前回の主要オプション(縦横・バックエンド設定等)をQSettingsから
+復元し、ダウンロード開始時に保存する。
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -23,29 +35,41 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..cli import extract_ncode
 from .cache_manager import CacheManagerWidget
 from .worker import DownloadOptions, DownloadWorker
 
 
 class DownloadTab(QWidget):
-    """ncode入力〜EPUBダウンロードを行うタブ。"""
+    """ncode入力〜EPUBダウンロードを行うタブ。複数ncode入力時は順番に処理する。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker: DownloadWorker | None = None
+        self._queue: list[str] = []
+        self._batch_total = 0
+        self._batch_index = 0
+        self._batch_cancelled = False
+        self._results: list[tuple[str, str, str]] = []  # (ncode, status, detail)
         self._build_ui()
+        self._load_settings()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
-        self.ncode_edit = QLineEdit()
-        self.ncode_edit.setPlaceholderText("例: N9669BK")
+        self.ncode_edit = QPlainTextEdit()
+        self.ncode_edit.setPlaceholderText(
+            "1行に1つのncode(例: N9669BK)または作品URLを入力。"
+            "複数行入力すると順番に一括ダウンロードします"
+        )
+        self.ncode_edit.setFixedHeight(70)
+        self.ncode_edit.textChanged.connect(self._update_output_enabled)
         form.addRow("ncode:", self.ncode_edit)
 
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("省略時は作品タイトルから自動生成")
+        self.output_edit.setPlaceholderText("省略時は作品タイトルから自動生成(複数ncode指定時は常に自動生成)")
         output_row.addWidget(self.output_edit)
         browse_btn = QPushButton("参照...")
         browse_btn.clicked.connect(self._browse_output)
@@ -92,9 +116,21 @@ class DownloadTab(QWidget):
             opts_layout.addWidget(chk)
         layout.addWidget(opts_group)
 
+        layout.addWidget(self._build_backend_group())
+
+        btn_row = QHBoxLayout()
         self.download_btn = QPushButton("ダウンロード開始")
         self.download_btn.clicked.connect(self._start_download)
-        layout.addWidget(self.download_btn)
+        btn_row.addWidget(self.download_btn)
+        self.cancel_btn = QPushButton("キャンセル")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_clicked)
+        btn_row.addWidget(self.cancel_btn)
+        layout.addLayout(btn_row)
+
+        self.status_label = QLabel()
+        self.status_label.setVisible(False)
+        layout.addWidget(self.status_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
@@ -105,10 +141,81 @@ class DownloadTab(QWidget):
         self.log_edit.setReadOnly(True)
         layout.addWidget(self.log_edit, 1)
 
+    def _build_backend_group(self) -> QGroupBox:
+        group = QGroupBox("EPUB化バックエンド")
+        form = QFormLayout(group)
+
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["ebooklib", "aozoraepub3"])
+        self.backend_combo.currentTextChanged.connect(self._update_backend_enabled)
+        form.addRow("バックエンド:", self.backend_combo)
+
+        jar_row = QHBoxLayout()
+        self.jar_edit = QLineEdit()
+        self.jar_edit.setPlaceholderText("AozoraEpub3(改造版)の.jarへのパス")
+        jar_row.addWidget(self.jar_edit)
+        self.jar_browse_btn = QPushButton("参照...")
+        self.jar_browse_btn.clicked.connect(self._browse_jar)
+        jar_row.addWidget(self.jar_browse_btn)
+        form.addRow("AozoraEpub3.jar:", jar_row)
+
+        self.device_edit = QLineEdit()
+        self.device_edit.setPlaceholderText("例: kindle(空欄で未指定)")
+        form.addRow("デバイス最適化:", self.device_edit)
+
+        self.emit_aozora_txt_check = QCheckBox(
+            "EPUBと共に青空文庫記法テキスト(.txt)も書き出す(ebooklibバックエンドのみ)"
+        )
+        self.emit_aozora_txt_check.toggled.connect(self._update_backend_enabled)
+        form.addRow(self.emit_aozora_txt_check)
+
+        self.emit_aozora_txt_images_check = QCheckBox(
+            "上記テキストに挿絵をダウンロードして挿絵注記も含める"
+        )
+        form.addRow(self.emit_aozora_txt_images_check)
+
+        self._update_backend_enabled()
+        return group
+
+    def _update_backend_enabled(self) -> None:
+        is_aozoraepub3 = self.backend_combo.currentText() == "aozoraepub3"
+        self.jar_edit.setEnabled(is_aozoraepub3)
+        self.jar_browse_btn.setEnabled(is_aozoraepub3)
+        self.device_edit.setEnabled(is_aozoraepub3)
+        # --emit-aozora-txt は aozoraepub3 バックエンドとは併用不可(cli.pyと同じ制約)
+        self.emit_aozora_txt_check.setEnabled(not is_aozoraepub3)
+        self.emit_aozora_txt_images_check.setEnabled(
+            not is_aozoraepub3 and self.emit_aozora_txt_check.isChecked()
+        )
+
+    def _update_output_enabled(self) -> None:
+        multiple = len(self._ncodes()) > 1
+        self.output_edit.setEnabled(not multiple)
+
+    def _ncodes(self) -> list[str]:
+        """ncode欄の各行を読み取り、URL入力ならncode部分を抽出して返す(重複除去済み)。"""
+        seen: set[str] = set()
+        result: list[str] = []
+        for line in self.ncode_edit.toPlainText().splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            ncode = extract_ncode(raw)
+            if ncode.lower() in seen:
+                continue
+            seen.add(ncode.lower())
+            result.append(ncode)
+        return result
+
     def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "出力先を選択", "", "EPUBファイル (*.epub)")
         if path:
             self.output_edit.setText(path)
+
+    def _browse_jar(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "AozoraEpub3.jarを選択", "", "jarファイル (*.jar)")
+        if path:
+            self.jar_edit.setText(path)
 
     def _append_log(self, message: str) -> None:
         self.log_edit.append(message)
@@ -117,17 +224,77 @@ class DownloadTab(QWidget):
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(current)
 
+    # --- QSettings ---
+
+    def _load_settings(self) -> None:
+        settings = QSettings()
+        self.yoko_check.setChecked(settings.value("download/yoko", False, type=bool))
+        self.no_chapters_check.setChecked(settings.value("download/no_chapters", False, type=bool))
+        self.no_images_check.setChecked(settings.value("download/no_images", False, type=bool))
+        self.sleep_spin.setValue(float(settings.value("download/sleep", 1.0)))
+        self.backend_combo.setCurrentText(str(settings.value("download/backend", "ebooklib")))
+        self.jar_edit.setText(str(settings.value("download/aozoraepub3_jar", "")))
+        self.device_edit.setText(str(settings.value("download/device", "")))
+        self.emit_aozora_txt_check.setChecked(
+            settings.value("download/emit_aozora_txt", False, type=bool)
+        )
+        self.emit_aozora_txt_images_check.setChecked(
+            settings.value("download/emit_aozora_txt_images", False, type=bool)
+        )
+        self._update_backend_enabled()
+
+    def _save_settings(self) -> None:
+        settings = QSettings()
+        settings.setValue("download/yoko", self.yoko_check.isChecked())
+        settings.setValue("download/no_chapters", self.no_chapters_check.isChecked())
+        settings.setValue("download/no_images", self.no_images_check.isChecked())
+        settings.setValue("download/sleep", self.sleep_spin.value())
+        settings.setValue("download/backend", self.backend_combo.currentText())
+        settings.setValue("download/aozoraepub3_jar", self.jar_edit.text())
+        settings.setValue("download/device", self.device_edit.text())
+        settings.setValue("download/emit_aozora_txt", self.emit_aozora_txt_check.isChecked())
+        settings.setValue(
+            "download/emit_aozora_txt_images", self.emit_aozora_txt_images_check.isChecked()
+        )
+
+    # --- ダウンロード開始・キューの進行 ---
+
     def _start_download(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             return
-        ncode = self.ncode_edit.text().strip()
-        if not ncode:
-            QMessageBox.warning(self, "入力エラー", "ncodeを入力してください。")
+        ncodes = self._ncodes()
+        if not ncodes:
+            QMessageBox.warning(self, "入力エラー", "ncodeを1つ以上入力してください。")
+            return
+        if self.backend_combo.currentText() == "aozoraepub3" and not self.jar_edit.text().strip():
+            QMessageBox.warning(
+                self, "入力エラー", "aozoraepub3バックエンドにはAozoraEpub3.jarの指定が必要です。"
+            )
             return
 
-        options = DownloadOptions(
+        self._save_settings()
+
+        self._queue = ncodes
+        self._batch_total = len(ncodes)
+        self._batch_index = 0
+        self._batch_cancelled = False
+        self._results = []
+
+        self.log_edit.clear()
+        self.download_btn.setEnabled(False)
+        self.download_btn.setText("ダウンロード中...")
+        self.cancel_btn.setEnabled(True)
+        self.ncode_edit.setEnabled(False)
+        self.output_edit.setEnabled(False)
+        self.status_label.setVisible(self._batch_total > 1)
+
+        self._start_next_in_queue()
+
+    def _current_options(self, ncode: str) -> DownloadOptions:
+        single = self._batch_total == 1
+        return DownloadOptions(
             ncode=ncode,
-            output=self.output_edit.text().strip() or None,
+            output=(self.output_edit.text().strip() or None) if single else None,
             sleep=self.sleep_spin.value(),
             start=self.start_spin.value(),
             end=self.end_spin.value() or None,
@@ -137,40 +304,122 @@ class DownloadTab(QWidget):
             no_cache=self.no_cache_check.isChecked(),
             refresh=self.refresh_check.isChecked(),
             clear_cache=self.clear_cache_check.isChecked(),
+            backend=self.backend_combo.currentText(),
+            aozoraepub3_jar=(Path(self.jar_edit.text().strip()) if self.jar_edit.text().strip() else None),
+            device=self.device_edit.text().strip() or None,
+            emit_aozora_txt=self.emit_aozora_txt_check.isChecked(),
+            emit_aozora_txt_images=self.emit_aozora_txt_images_check.isChecked(),
         )
 
-        self.log_edit.clear()
+    def _start_next_in_queue(self) -> None:
+        if self._batch_cancelled or not self._queue:
+            self._finish_batch()
+            return
+
+        ncode = self._queue.pop(0)
+        self._batch_index += 1
+        if self._batch_total > 1:
+            self.status_label.setText(f"全体の進捗: {self._batch_index}/{self._batch_total}件目 ({ncode})")
+            self._append_log(f"\n=== [{self._batch_index}/{self._batch_total}] {ncode} ===")
+
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("ダウンロード中...")
 
+        options = self._current_options(ncode)
         self.worker = DownloadWorker(options)
         self.worker.log.connect(self._append_log)
         self.worker.progress.connect(self._on_progress)
-        self.worker.finished_ok.connect(self._on_finished_ok)
-        self.worker.finished_error.connect(self._on_finished_error)
+        self.worker.finished_ok.connect(lambda path, n=ncode: self._on_item_finished(n, "ok", path))
+        self.worker.finished_error.connect(
+            lambda message, n=ncode: self._on_item_finished(n, "error", message)
+        )
+        self.worker.finished_cancelled.connect(lambda n=ncode: self._on_item_finished(n, "cancelled", ""))
         self.worker.start()
 
-    def _reset_button(self) -> None:
+    def _on_item_finished(self, ncode: str, status: str, detail: str) -> None:
+        self._results.append((ncode, status, detail))
+        if status == "error":
+            self._append_log(f"[エラー] {detail}")
+        self._start_next_in_queue()
+
+    @staticmethod
+    def _reveal_in_finder(path: str) -> None:
+        """生成されたEPUB(またはその出力フォルダ)をFinderで開く(macOSのみ)。
+
+        ファイルパスなら"-R"でそのファイルを選択状態にして表示し、
+        フォルダパス(一括ダウンロード時の出力先)ならフォルダ自体を開く。
+        """
+        if sys.platform != "darwin":
+            return
+        if Path(path).is_dir():
+            subprocess.run(["open", path], check=False)
+        else:
+            subprocess.run(["open", "-R", path], check=False)
+
+    def _cancel_clicked(self) -> None:
+        self._batch_cancelled = True
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("キャンセル中...")
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self._append_log("キャンセルを要求しました(現在の話の取得完了後に停止します)。")
+
+    def _finish_batch(self) -> None:
         self.download_btn.setEnabled(True)
         self.download_btn.setText("ダウンロード開始")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("キャンセル")
+        self.ncode_edit.setEnabled(True)
+        self._update_output_enabled()
+        self.status_label.setVisible(False)
 
-    def _on_finished_ok(self, output_path: str) -> None:
-        self._reset_button()
-        QMessageBox.information(self, "完了", f"EPUBを生成しました:\n{output_path}")
+        if not self._results:
+            return  # 何も実行されないままキャンセルされた場合
 
-    def _on_finished_error(self, message: str) -> None:
-        self._reset_button()
-        self._append_log(f"[エラー] {message}")
-        QMessageBox.critical(self, "エラー", message)
+        ok_paths = [detail for _, s, detail in self._results if s == "ok"]
+        errors = [n for n, s, _ in self._results if s == "error"]
+        cancelled = sum(1 for _, s, _ in self._results if s == "cancelled")
+
+        if self._batch_total == 1:
+            ncode, status, detail = self._results[0]
+            if status == "ok":
+                self._show_completion_dialog(
+                    "完了", "EPUBを生成しました。", reveal_path=detail
+                )
+            elif status == "cancelled":
+                self._append_log("キャンセルされました。")
+            return  # errorの場合は_on_item_finishedで既にログ表示済み
+
+        summary = f"完了: 成功{len(ok_paths)}件"
+        if errors:
+            summary += f" / 失敗{len(errors)}件({', '.join(errors)})"
+        if cancelled:
+            summary += f" / キャンセル{cancelled}件"
+        self._append_log(f"\n{summary}")
+        # 一括ダウンロードの出力先は全て同じフォルダ(自動命名時のカレント
+        # ディレクトリ)なので、個々のファイルではなくフォルダを表示する
+        reveal_dir = str(Path(ok_paths[0]).resolve().parent) if ok_paths else None
+        self._show_completion_dialog("一括ダウンロード完了", summary, reveal_path=reveal_dir)
+
+    def _show_completion_dialog(self, title: str, message: str, reveal_path: str | None) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setIcon(QMessageBox.Information)
+        box.addButton(QMessageBox.Ok)
+        reveal_btn = None
+        if reveal_path and sys.platform == "darwin":
+            reveal_btn = box.addButton("Finderで表示", QMessageBox.ActionRole)
+        box.exec()
+        if reveal_btn is not None and box.clickedButton() is reveal_btn:
+            self._reveal_in_finder(reveal_path)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("narou-dl")
-        self.resize(720, 640)
+        self.resize(760, 760)
 
         tabs = QTabWidget()
         tabs.addTab(DownloadTab(), "ダウンロード")

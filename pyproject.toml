@@ -22,6 +22,9 @@ docs = [
 gui = [
     "PySide6>=6.5",
 ]
+dev = [
+    "pytest>=7.0",
+]
 
 [project.scripts]
 narou-dl = "narou_dl.cli:main"

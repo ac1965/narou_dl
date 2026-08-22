@@ -1,33 +1,24 @@
 # narou-dl
 
-「小説家になろう」の作品をダウンロードして、EPUB(縦書き/横書き)に変換するPythonツール。
+「小説家になろう」の作品をダウンロードして、EPUB(縦書き/横書き)に変換するツール。
+CLI(`narou-dl`)とmacOS用GUI(`narou-dl-gui`)を同じコアロジックで提供する。
 
-## セットアップ
+- Python 3.10以上
+- GUI・`.app`ビルドはmacOS専用(CLI自体はOS非依存)
 
-このディレクトリ(`pyproject.toml`があるフォルダ)で`make setup-cli`を
-実行すると、専用の仮想環境(`.venv/`)を作ってインストールします。
+## クイックスタート
 
 ```bash
 make setup-cli
 .venv/bin/narou-dl N9669BK
 ```
 
-Makefileを使わず直接インストールする場合は以下でも構いません。
+`N9669BK` の部分はncode(作品コード)。作品URL
+(`https://ncode.syosetu.com/n9669bk/`)をそのまま渡してもよい
+(大文字・小文字は区別しない)。既定で縦書きEPUBが `作品タイトル.epub` として
+カレントディレクトリに出力される。
 
-```bash
-pip install -e .
-```
-
-`narou-dl` コマンドが使えるようになります。
-
-インストールせずに直接実行したい場合は依存パッケージのみ入れてください。
-
-```bash
-pip install requests beautifulsoup4 ebooklib
-python -m narou_dl N9669BK
-```
-
-### Makefile
+## Makefile
 
 | コマンド | 内容 |
 | --- | --- |
@@ -35,86 +26,109 @@ python -m narou_dl N9669BK
 | `make setup-gui` | GUI(`narou-dl-gui`)用の仮想環境 `.venv-gui/` を作りインストールする |
 | `make run ARGS='N9669BK --yoko'` | `.venv/`のCLIを実行する |
 | `make run-gui` | `.venv-gui/`のGUIを起動する |
-| `make app` | macOS用 `dist/narou-dl.app` をビルドする(後述) |
+| `make app` | macOS用 `dist/narou-dl.app` をビルドする([該当節](#appバンドルのビルドpy2app)参照) |
+| `make install-app` | `dist/narou-dl.app` を `/Applications` にインストールする(無ければ先にビルドする) |
+| `make uninstall-app` | インストールした `narou-dl.app` を削除する |
+| `make test` | pytestでテストスイートを実行する |
 | `make clean` | `__pycache__`・各種キャッシュディレクトリを削除する |
 | `make distclean` | `clean`に加え仮想環境・ビルド成果物も含めて全て削除する |
 
-CLIとGUIの仮想環境を分けているのは、GUIのみが必要とするPySide6
-(数百MB)をCLI用環境に持ち込まないため。
+CLI/GUI/`.app`ビルドの仮想環境(`.venv/` `.venv-gui/` `.venv-app-build/`)を
+分けているのは、それぞれが必要とする依存(特にGUIのPySide6は数百MB)を
+混在させないため。Makefileを使わず直接インストールする場合は
+`pip install -e .`(CLI)/ `pip install -e ".[gui]"`(GUI)でも構わない。
 
-## 使い方
+## CLIの使い方
+
+### 基本
 
 ```bash
-# ncode を指定してフル取得(縦書き。作品タイトル.epub が出力される)
-narou-dl N9669BK
+narou-dl N9669BK                          # フル取得(縦書き)
+narou-dl N9669BK --yoko                   # 横書きで生成
+narou-dl N9669BK -o musyoku.epub          # 出力ファイル名を指定(拡張子省略可)
+narou-dl N9669BK --sleep 1.5              # 各話取得後の待機秒数を指定(既定1.0秒)
+narou-dl N9669BK --start 1 --end 20       # 一部の話だけ取得
+narou-dl N9669BK --no-chapters            # 章立てを無視してフラットな目次にする
+narou-dl N9669BK --no-images              # 挿絵を埋め込まない
+narou-dl N9669BK --reveal                 # 生成後、Finderでファイルを選択状態にする(macOSのみ)
+```
 
-# 横書きで生成
-narou-dl N9669BK --yoko
+ncode の代わりに作品URL(`https://ncode.syosetu.com/n9669bk/`、話ページの
+URLでも可)をそのまま指定できる(GUIのncode欄でも同様)。
 
-# 出力ファイル名・待機秒数を指定
-narou-dl N9669BK -o musyoku.epub --sleep 1.5
+### キャッシュ
 
-# 一部の話だけ取得(1〜20話)
-narou-dl N9669BK --start 1 --end 20
+取得した本文・章立て・挿絵は既定でキャッシュディレクトリに保存され、
+再ダウンロード時はキャッシュにある話・挿絵をネットワークアクセスなしで
+再利用する。キャッシュ利用時は目次から話ごとの最終更新日時を取得し、
+なろう側で「改稿」された話だけを自動的に再取得する。
 
-# 章立てを無視してフラットな目次にする
-narou-dl N9669BK --no-chapters
+```bash
+narou-dl N9669BK --refresh            # キャッシュを無視して取り直す(改稿更新など)
+narou-dl N9669BK --clear-cache        # この作品のキャッシュを削除してから取得する
+narou-dl N9669BK --no-cache           # キャッシュを使わない
+narou-dl N9669BK --no-update-check    # 改稿の自動検知をせず、キャッシュがあれば常に使う
+narou-dl N9669BK --cache-dir DIR      # キャッシュの保存先を明示指定する
+```
 
-# 挿絵を埋め込まない
-narou-dl N9669BK --no-images
+キャッシュディレクトリの決定順序: `--cache-dir` > 環境変数
+`XDG_CACHE_HOME`(`$XDG_CACHE_HOME/narou-dl`) > カレントディレクトリの
+`./.narou-dl-cache`。
 
-# キャッシュを無視して取り直す(改稿などで本文が更新された場合)
-narou-dl N9669BK --refresh
+### EPUB化バックエンド
 
-# この作品のキャッシュを削除してから取得する
-narou-dl N9669BK --clear-cache
+既定は `ebooklib`(narou_dl自身がHTMLを直接EPUB化する)。より高度な組版が
+必要な場合は `aozoraepub3` を指定する(JRE(Java 21以降推奨)と
+`AozoraEpub3.jar`(改造版)が別途必要)。
 
-# キャッシュを使わない
-narou-dl N9669BK --no-cache
-
-# AozoraEpub3(改造版)を外部プロセスとして使い、より高度な組版でEPUB化する
-# (傍点・外字自動判定・縦中横・画像回り込み等。JRE(Java 21以降推奨)と
-#  AozoraEpub3.jar本体が別途必要)
+```bash
+# AozoraEpub3(改造版)を外部プロセスとして使う
+# (傍点・外字自動判定・縦中横・画像回り込み等、より高度な組版が可能)
 narou-dl N9669BK --backend aozoraepub3 --aozoraepub3-jar /path/to/AozoraEpub3.jar
 # --aozoraepub3-jar の代わりに環境変数でも指定できる
 export AOZORAEPUB3_JAR=~/.local/share/aozoraepub3/AozoraEpub3.jar
 narou-dl N9669BK --backend aozoraepub3
+narou-dl N9669BK --backend aozoraepub3 --device kindle  # デバイス最適化を指定
 
 # ebooklibでEPUBを生成しつつ、同じ話データから青空文庫記法テキスト(.txt)も書き出す
 # (挿絵注記は既定で含めない。--backend aozoraepub3 とは併用不可)
 narou-dl N9669BK --emit-aozora-txt
-# 挿絵をダウンロードして挿絵注記も含める場合
-narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images
+narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images  # 挿絵注記も含める
 ```
 
-ncode は作品URL (`https://ncode.syosetu.com/n9669bk/`) の `n9669bk` の部分です。
-大文字・小文字どちらでも指定できます。
+### ライブラリ機能
 
-`-o` に `.epub` 拡張子を付けずに指定した場合は自動的に付与されます。
+追跡したい作品を登録しておくと、まとめて更新できる
+(`<cache_dir>/library.json`に登録時のオプションと共に記憶される)。
+
+```bash
+narou-dl N9669BK --library-add     # ダウンロード後、今回のオプションと共に登録する
+narou-dl --update-all              # 登録済みの全作品を登録時のオプションで再取得する
+narou-dl --library-list            # 登録済みの作品を一覧表示する
+narou-dl N9669BK --library-remove  # 登録を削除する(ダウンロードは行わない)
+```
+
+`--update-all`は新規話・改稿された話だけをキャッシュの鮮度判定で効率的に
+取得するため、日々の巡回チェック用途に向いている(cronやlaunchdから
+定期実行することを想定)。
 
 ## GUIアプリ(macOS)
 
-CLIと同じダウンロード処理をPySide6製のGUIから使えます。
+CLIと同じダウンロード処理をPySide6製のGUIから使える。
 
 ```bash
 make setup-gui
 make run-gui
 ```
 
-Makefileを使わない場合:
-
-```bash
-pip install -e ".[gui]"
-narou-dl-gui
-# またはインストールせずに
-python -m narou_dl.gui
-```
-
-- **ダウンロードタブ**: ncodeと出力先、取得範囲(開始/終了話数・待機時間)、
-  縦書き/横書きなどの主要オプションを指定して実行できます。進捗バーと
-  ログ表示で取得状況を確認できます(内部の処理はCLIの`run()`と共通)。
-- **キャッシュ管理タブ**: `cache.py` が作品ごとに作るキャッシュディレクトリを
-  一覧表示し、作品単位での削除・全削除・Finderで開く操作ができます。
+| 機能 | 内容 |
+| --- | --- |
+| 一括ダウンロード | ncode欄に1行1件で複数指定すると、順番に自動でダウンロードする(出力ファイル名は各作品とも自動生成) |
+| キャンセル | ダウンロード中は「キャンセル」ボタンで中断できる(現在取得中の話の完了を待ってから止まる協調的キャンセル)。一括ダウンロード中にキャンセルすると残りのキューも実行されない |
+| バックエンド選択 | `ebooklib`(既定)/`aozoraepub3`をGUIから選択できる。`aozoraepub3`選択時は`.jar`パス・デバイス最適化オプションを指定できる。`ebooklib`選択時は`--emit-aozora-txt`相当のオプションも利用できる |
+| 設定の保存 | 主要オプション(縦横・バックエンド設定等)はQSettingsに保存され、次回起動時に復元される(macOSでは`~/Library/Preferences/com.ty07.narou-dl.plist`) |
+| Finderで表示 | ダウンロード完了ダイアログの「Finderで表示」ボタンから、生成したEPUB(一括ダウンロード時は出力フォルダ)をFinderで開ける |
+| キャッシュ管理タブ | `cache.py`が作品ごとに作るキャッシュディレクトリを一覧表示し、作品単位での削除・全削除・Finderで開く操作ができる |
 
 ### .appバンドルのビルド(py2app)
 
@@ -123,19 +137,24 @@ python -m narou_dl.gui
 `scripts/trim_macos_bundle.py`でこのアプリが実際に使うQtモジュールだけに
 絞り込み、Qtプラグインの参照先修正・再署名まで行うと約200MBになる。
 
-汚染されていないクリーンな仮想環境(pandas等の無関係なパッケージが
-入っていない環境)でビルドすることを強く推奨する。dev環境に大量の
-パッケージが入っていると、py2appがそれらを巻き込んで検出してしまい、
-サイズ増大や無関係なパッケージの署名エラーの原因になる。そのため
-`make app`は専用の仮想環境`.venv-app-build/`を都度作り直してビルドする
-(`.venv/`や`.venv-gui/`とは共有しない)。
-
 ```bash
 make app
 open dist/narou-dl.app
 ```
 
-`make app`は内部で以下を行っている(直接実行したい場合の参考):
+`/Applications`に置いてFinderやLaunchpadから起動したい場合は
+`make install-app`でインストールする(`dist/narou-dl.app`が無ければ先に
+`make app`を実行してからインストールする)。
+
+```bash
+make install-app                          # /Applications/narou-dl.app にインストール
+make install-app INSTALL_DIR=~/Applications  # インストール先を変更する場合
+make uninstall-app                        # インストールしたアプリを削除する
+```
+
+`make app`は専用の仮想環境`.venv-app-build/`を都度作り直してビルドする
+(汚染されていないクリーンな環境でないと、py2appが無関係なパッケージを
+巻き込んでサイズ増大や署名エラーの原因になるため)。内部では以下を行っている:
 
 ```bash
 python3 -m venv .venv-app-build
@@ -180,10 +199,23 @@ mv pyproject.toml.bak pyproject.toml
    - 同じ作品を再度ダウンロードする際は、キャッシュにある話・挿絵はネットワークアクセスなしで再利用する
    - 章立ては全話数が変わると自動的にキャッシュを無効化する(新しい話が投稿された場合など)
    - `--refresh` でキャッシュを無視して取り直し、`--clear-cache` でキャッシュを削除、`--no-cache` でキャッシュ自体を使わない
-   - キャッシュディレクトリの決定順序:
-     1. `--cache-dir` で明示指定した場所
-     2. 環境変数 `XDG_CACHE_HOME` が設定されていれば `$XDG_CACHE_HOME/narou-dl` (例: `~/.cache/narou-dl`)
-     3. どちらも無ければカレントディレクトリ(プロジェクト内)の `./.narou-dl-cache`
+5. **ライブラリ** (`narou_dl/library.py`)
+   - `--library-add`で登録した作品は、その時点のオプションと共に
+     `<cache_dir>/library.json`に記憶される
+   - `--update-all`で登録済みの全作品を登録時のオプションのまままとめて
+     再取得できる(実際の取得処理自体はキャッシュ機構をそのまま利用するため、
+     新規話・改稿された話だけが効率的に取得される)
+
+## テスト
+
+`scraper.py`(なろうのHTML構造への依存が強く、サイト側の変更で壊れやすい)を
+中心に、`cache.py`・`aozora.py`・`epub_builder.py`・`library.py`・`cli.py`の
+ユニットテストがある。実際のなろうサイトへは通信せず、固定HTMLやtmp_pathで
+完結する。
+
+```bash
+make test
+```
 
 ## 制限事項・今後の拡張余地
 

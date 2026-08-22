@@ -3,6 +3,7 @@
 使い方 (インストール後)::
 
     narou-dl N9669BK
+    narou-dl https://ncode.syosetu.com/n9669bk/  # ncodeの代わりに作品URLも指定できる
     narou-dl N9669BK -o musyoku.epub --sleep 1.5
     narou-dl N9669BK --start 1 --end 20   # 一部の話だけ取得
     narou-dl N9669BK --yoko               # 横書きで生成(既定は縦書き)
@@ -23,6 +24,15 @@
                                            # 青空文庫記法テキストも書き出す(挿絵注記は既定で含めない)
     narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images
                                            # 上記に加え、挿絵をダウンロードして挿絵注記も含める
+
+    narou-dl N9669BK --reveal              # 生成後、Finderでファイルを選択状態にする(macOSのみ)
+
+    narou-dl N9669BK --library-add        # ダウンロード後、今回のオプションと共に
+                                           # ライブラリに登録する
+    narou-dl --update-all                 # ライブラリの全作品を登録時のオプションで
+                                           # まとめて再取得する(ncode不要)
+    narou-dl --library-list               # 登録済みの全作品を一覧表示する(ncode不要)
+    narou-dl N9669BK --library-remove     # ライブラリから削除する(ダウンロードは行わない)
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
@@ -72,9 +82,11 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -84,6 +96,7 @@ from .aozoraepub3_backend import AozoraEpub3Error, build_epub_via_aozoraepub3
 from .cache import Cache
 from .epub_builder import build_epub
 from .image_fetch import download_images_for_aozora
+from .library import LIBRARY_OPTION_KEYS, Library
 from .scraper import Episode, EpisodeScraper, ScrapeError, TocEntry
 
 MAX_RETRIES = 3
@@ -91,6 +104,34 @@ MAX_RETRIES = 3
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+
+
+def extract_ncode(value: str) -> str:
+    """ncode入力欄への入力値から、素のncode部分を取り出す
+
+    以下のいずれの形式でも受け付ける(GUI・CLI共通で使う)::
+
+        N9669BK
+        n9669bk
+        https://ncode.syosetu.com/n9669bk/
+        https://ncode.syosetu.com/n9669bk/1/   (話ページのURLでも先頭部分を使う)
+        ncode.syosetu.com/n9669bk              (スキーム省略)
+
+    Args:
+        value: ユーザーが入力したncode、またはなろうの作品/話ページURL。
+
+    Returns:
+        抽出したncode。URLと判断できない入力はそのまま返す
+        (素のncode入力時に余計な変換をしないため)。ncode自体の妥当性は
+        検証しない(誤りがあれば後続のAPI呼び出しで自然にエラーになる)。
+    """
+    value = value.strip()
+    if "syosetu.com" not in value.lower() and "://" not in value:
+        return value
+
+    parsed_value = value if "://" in value else f"https://{value}"
+    segments = [s for s in urlparse(parsed_value).path.split("/") if s]
+    return segments[0] if segments else value
 
 
 def fetch_with_retry(label: str, func, retries: int = MAX_RETRIES):
@@ -152,7 +193,16 @@ def run(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="小説家になろうの作品をダウンロードしてEPUBに変換する"
     )
-    parser.add_argument("ncode", help="作品コード (例: N9669BK)")
+    parser.add_argument(
+        "ncode",
+        nargs="?",
+        default=None,
+        help=(
+            "作品コード (例: N9669BK)、または作品URL "
+            "(例: https://ncode.syosetu.com/n9669bk/)。"
+            "--update-all/--library-list指定時は省略可"
+        ),
+    )
     parser.add_argument(
         "-o", "--output",
         help="出力ファイル名 (省略時は作品タイトルから自動生成。.epub拡張子が無ければ自動付与する)",
@@ -240,7 +290,57 @@ def run(argv: list[str] | None = None) -> int:
             "挿絵注記を含める(既定では挿絵注記は含めない)"
         ),
     )
+    parser.add_argument(
+        "--reveal",
+        action="store_true",
+        help=(
+            "生成後、macOSのFinderでEPUBファイルを選択状態で表示する"
+            "(Finder上からダブルクリックで開けるようにする。macOS以外では無視される)"
+        ),
+    )
+    parser.add_argument(
+        "--library-add",
+        action="store_true",
+        help=(
+            "ダウンロード後、この作品を今回指定したオプションと共に"
+            "ライブラリに登録する(--update-allで追跡・一括更新できるようになる)"
+        ),
+    )
+    parser.add_argument(
+        "--library-remove",
+        action="store_true",
+        help="この作品をライブラリから削除する(ダウンロードは行わない。ncode必須)",
+    )
+    parser.add_argument(
+        "--library-list",
+        action="store_true",
+        help="ライブラリに登録済みの全作品を一覧表示する(ncode指定不要)",
+    )
+    parser.add_argument(
+        "--update-all",
+        action="store_true",
+        help=(
+            "ライブラリに登録済みの全作品を、登録時のオプションでまとめて"
+            "再取得する(ncode指定不要。新規話・改稿された話のみキャッシュの"
+            "鮮度判定により効率的に取得される)"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.ncode:
+        args.ncode = extract_ncode(args.ncode)
+
+    cache_dir_for_library = Path(args.cache_dir) if args.cache_dir else None
+
+    if args.library_list:
+        return _library_list(cache_dir_for_library)
+    if args.update_all:
+        return _update_all(parser, cache_dir_for_library)
+    if args.library_remove:
+        if not args.ncode:
+            parser.error("--library-remove にはncodeの指定が必要です")
+        return _library_remove(args.ncode, cache_dir_for_library)
+    if not args.ncode:
+        parser.error("ncode を指定してください(または --update-all / --library-list)")
 
     if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
         parser.error(
@@ -254,6 +354,84 @@ def run(argv: list[str] | None = None) -> int:
             "(aozoraepub3 バックエンドは既に青空文庫記法テキストを生成します)"
         )
 
+    return _download_and_build(args)
+
+
+def _library_list(cache_dir: Path | None) -> int:
+    """--library-list: 登録済みの全作品を一覧表示する。"""
+    entries = Library(cache_dir).load()
+    if not entries:
+        print("ライブラリに登録された作品はありません。")
+        return 0
+    for entry in sorted(entries.values(), key=lambda e: e.title):
+        print(f"{entry.ncode}\t{entry.title}\t(登録日: {entry.added_at})")
+    return 0
+
+
+def _library_remove(ncode: str, cache_dir: Path | None) -> int:
+    """--library-remove: 作品をライブラリから削除する。"""
+    if Library(cache_dir).remove(ncode):
+        print(f"ライブラリから削除しました: {ncode}")
+        return 0
+    print(f"ライブラリに登録されていません: {ncode}", file=sys.stderr)
+    return 1
+
+
+def _update_all(parser: argparse.ArgumentParser, cache_dir: Path | None) -> int:
+    """--update-all: ライブラリに登録済みの全作品を、登録時のオプションで
+    まとめて再取得する。1作品の失敗は他の作品の処理を止めない。
+    """
+    entries = Library(cache_dir).load()
+    if not entries:
+        print("ライブラリに登録された作品がありません。")
+        return 0
+
+    print(f"ライブラリの{len(entries)}作品を更新します。")
+    failed_titles: list[str] = []
+    for i, entry in enumerate(sorted(entries.values(), key=lambda e: e.title), start=1):
+        print(f"\n[{i}/{len(entries)}] {entry.title} ({entry.ncode})")
+        # 登録時に保存したオプションを、新規にparseしたNamespace(既定値込み)
+        # へ上書きする形で復元する。--library-add等の管理系フラグは
+        # 誤って再実行されないよう明示的にFalseへ戻す。
+        item_args = parser.parse_args([entry.ncode])
+        for key, value in entry.options.items():
+            if hasattr(item_args, key):
+                setattr(item_args, key, value)
+        if item_args.aozoraepub3_jar:
+            item_args.aozoraepub3_jar = Path(item_args.aozoraepub3_jar)
+        # update_all呼び出し時に指定された --cache-dir を各作品にも適用する
+        # (library.json自体もこのcache_dirから読み込んでいるため揃える)
+        item_args.cache_dir = str(cache_dir) if cache_dir else None
+        item_args.library_add = False
+        item_args.library_remove = False
+        item_args.library_list = False
+        item_args.update_all = False
+        item_args.clear_cache = False
+
+        try:
+            status = _download_and_build(item_args)
+        except Exception as exc:  # noqa: BLE001 - 1作品の失敗で全体を止めない
+            print(f"[エラー] {entry.title} の更新に失敗しました: {exc}", file=sys.stderr)
+            status = 1
+        if status != 0:
+            failed_titles.append(entry.title)
+
+    if failed_titles:
+        print(
+            f"\n{len(failed_titles)}作品の更新に失敗しました: {', '.join(failed_titles)}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"\n{len(entries)}作品すべて更新しました。")
+    return 0
+
+
+def _download_and_build(args: argparse.Namespace) -> int:
+    """1作品分のダウンロード〜EPUB(または青空文庫記法テキスト)生成を行う。
+
+    run()から通常のCLI実行時に、_update_all()からライブラリ一括更新時に、
+    それぞれ呼び出される共通の実処理本体。
+    """
     cache: Cache | None = None
     if not args.no_cache:
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
@@ -406,6 +584,18 @@ def run(argv: list[str] | None = None) -> int:
             txt_path = Path(output_path).with_suffix(".txt")
             txt_path.write_text(novel_text, encoding="utf-8")
             print(f"  青空文庫記法テキストを書き出しました -> {txt_path}")
+
+    if args.library_add:
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        options = {key: getattr(args, key) for key in LIBRARY_OPTION_KEYS}
+        options["aozoraepub3_jar"] = (
+            str(options["aozoraepub3_jar"]) if options["aozoraepub3_jar"] else None
+        )
+        Library(cache_dir).add(args.ncode, info.title, options)
+        print(f"ライブラリに登録しました: {info.title} ({args.ncode})")
+
+    if args.reveal and sys.platform == "darwin":
+        subprocess.run(["open", "-R", output_path], check=False)
 
     print("完了しました。")
     return 0
