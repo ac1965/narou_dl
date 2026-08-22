@@ -1,6 +1,8 @@
 # narou-dl
 
-![narou-dl GUI](screenshot_narou-dl.png)
+![narou-dl GUI 01](pict/screenshot_narou-dl_01.png)
+![narou-dl GUI 02](pict/screenshot_narou-dl_02.png)
+![narou-dl GUI 03](pict/screenshot_narou-dl_03.png)
 
 「小説家になろう」の作品をダウンロードして、EPUB(縦書き/横書き)に変換するツール。
 CLI(`narou-dl`)とmacOS用GUI(`narou-dl-gui`)を同じコアロジックで提供する。
