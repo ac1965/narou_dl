@@ -1,5 +1,7 @@
 # narou-dl
 
+![narou-dl GUI](screenshot_narou-dl.png)
+
 「小説家になろう」の作品をダウンロードして、EPUB(縦書き/横書き)に変換するツール。
 CLI(`narou-dl`)とmacOS用GUI(`narou-dl-gui`)を同じコアロジックで提供する。
 
@@ -72,8 +74,26 @@ narou-dl N9669BK --cache-dir DIR      # キャッシュの保存先を明示指�
 ```
 
 キャッシュディレクトリの決定順序: `--cache-dir` > 環境変数
-`XDG_CACHE_HOME`(`$XDG_CACHE_HOME/narou-dl`) > カレントディレクトリの
-`./.narou-dl-cache`。
+`XDG_CACHE_HOME`(`$XDG_CACHE_HOME/narou-dl`) > `~/.cache/narou-dl`。
+この既定値はカレントディレクトリに依存しないため、CLI・GUI・`.app`
+バンドルのどれで起動しても同じキャッシュを共有する。
+
+### 既定オプションの保存(CLI・GUI共有)
+
+`--yoko`・EPUB化バックエンド・待機秒数などの主要オプションは
+`~/.config/narou-dl/config.json`(環境変数`XDG_CONFIG_HOME`が設定されて
+いれば`$XDG_CONFIG_HOME/narou-dl/config.json`)に保存でき、CLI・GUI
+どちらで変更してももう一方に反映される。
+
+```bash
+narou-dl --save-config --yoko --backend aozoraepub3 --aozoraepub3-jar /path/to/AozoraEpub3.jar
+# ncodeを指定すればダウンロードと同時に保存できる
+narou-dl N9669BK --save-config --sleep 2.0
+```
+
+`--yoko`など、設定ファイルの既定値が`true`になっている項目を1回だけ
+無効化したい場合は`--no-yoko`のように否定形を指定する(`--help`で
+`--no-chapters, --no-no-chapters`のように表示される項目も同様)。
 
 ### EPUB化バックエンド
 
@@ -123,10 +143,10 @@ make run-gui
 
 | 機能 | 内容 |
 | --- | --- |
-| 一括ダウンロード | ncode欄に1行1件で複数指定すると、順番に自動でダウンロードする(出力ファイル名は各作品とも自動生成) |
+| 一括ダウンロード | ncode欄に1行1件で複数指定すると、順番に自動でダウンロードする(出力ファイル名は各作品とも自動生成)。進捗表示には現在取得中のncodeと、判明次第そのタイトルが添えて表示される |
 | キャンセル | ダウンロード中は「キャンセル」ボタンで中断できる(現在取得中の話の完了を待ってから止まる協調的キャンセル)。一括ダウンロード中にキャンセルすると残りのキューも実行されない |
 | バックエンド選択 | `ebooklib`(既定)/`aozoraepub3`をGUIから選択できる。`aozoraepub3`選択時は`.jar`パス・デバイス最適化オプションを指定できる。`ebooklib`選択時は`--emit-aozora-txt`相当のオプションも利用できる |
-| 設定の保存 | 主要オプション(縦横・バックエンド設定等)はQSettingsに保存され、次回起動時に復元される(macOSでは`~/Library/Preferences/com.ty07.narou-dl.plist`) |
+| 設定の保存 | 主要オプション(縦横・バックエンド設定等)は`~/.config/narou-dl/config.json`に保存され、次回起動時に復元される。CLIの`--save-config`と同じファイルを共有するため、どちらで変更してももう一方に反映される(詳細は「CLIの使い方」内の既定オプション保存の節を参照) |
 | Finderで表示 | ダウンロード完了ダイアログの「Finderで表示」ボタンから、生成したEPUB(一括ダウンロード時は出力フォルダ)をFinderで開ける |
 | キャッシュ管理タブ | `cache.py`が作品ごとに作るキャッシュディレクトリを一覧表示し、作品単位での削除・全削除・Finderで開く操作ができる |
 

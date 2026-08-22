@@ -4,8 +4,15 @@
 明示指定された場合はそちらが最優先):
 
   1. 環境変数 XDG_CACHE_HOME が設定されていれば `$XDG_CACHE_HOME/narou-dl`
-     (典型的には ~/.cache/narou-dl)
-  2. それ以外はプロジェクト内(カレントディレクトリ) `./.narou-dl-cache`
+  2. それ以外は `~/.cache/narou-dl`
+
+以前はXDG_CACHE_HOME未設定時にカレントディレクトリ基準(./.narou-dl-cache)
+にフォールバックしていたが、CLI・GUI(pipインストール版)・.appバンドル
+(py2app)でプロセスの起動時cwdが異なる(.appバンドルはpy2appの
+__boot__.pyが起動時にcwdをアプリ内のContents/Resourcesへ変更する)ため、
+起動方法によってキャッシュが別々の場所に散らばってしまっていた。
+ホームディレクトリ基準の固定パスにすることで、起動方法によらず常に
+同じキャッシュを共有するようにした。
 
 作品ごとに以下の構成でキャッシュを持つ::
 
@@ -47,16 +54,15 @@ def default_cache_dir() -> Path:
 
     優先順位:
       1. 環境変数 XDG_CACHE_HOME が設定されていれば `$XDG_CACHE_HOME/narou-dl`
-         (例: ~/.cache/narou-dl)
-      2. それ以外はプロジェクト内(カレントディレクトリ) `./.narou-dl-cache`
+      2. それ以外は `~/.cache/narou-dl` (カレントディレクトリには依存しない。
+         起動方法(CLI/GUI/.appバンドル)によって結果が変わらないようにするため)
 
     Returns:
         キャッシュの既定保存先ディレクトリ。
     """
     xdg = os.environ.get("XDG_CACHE_HOME")
-    if xdg:
-        return Path(xdg) / "narou-dl"
-    return Path.cwd() / ".narou-dl-cache"
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "narou-dl"
 
 
 class Cache:

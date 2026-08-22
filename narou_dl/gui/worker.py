@@ -68,6 +68,7 @@ class DownloadWorker(QThread):
 
     log = Signal(str)
     progress = Signal(int, int)  # (現在, 全体)
+    title_fetched = Signal(str)  # 作品タイトル(取得完了時。進捗表示のncodeに添える用)
     finished_ok = Signal(str)  # 出力先パス
     finished_error = Signal(str)  # エラーメッセージ
     finished_cancelled = Signal()
@@ -116,6 +117,7 @@ class DownloadWorker(QThread):
         if cache:
             cache.save_info(info)
 
+        self.title_fetched.emit(info.title)
         self.log.emit(f"タイトル: {info.title}")
         self.log.emit(f"作者: {info.writer}")
         self.log.emit(

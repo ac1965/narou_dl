@@ -2,8 +2,33 @@
 from __future__ import annotations
 
 from narou_dl.api import NovelInfo
-from narou_dl.cache import Cache
+from narou_dl.cache import Cache, default_cache_dir
 from narou_dl.scraper import Episode
+
+
+def test_default_cache_dir_uses_xdg_cache_home_when_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert default_cache_dir() == tmp_path / "narou-dl"
+
+
+def test_default_cache_dir_ignores_cwd_when_xdg_unset(monkeypatch, tmp_path):
+    """CLI・GUI・.appバンドルで起動時cwdが異なっても同じキャッシュ場所になること。
+
+    以前はcwd基準(./.narou-dl-cache)にフォールバックしており、py2appの
+    .appバンドルは起動時にcwdをアプリ内部へ変更するため、CLIとGUIで
+    キャッシュが別々の場所に分かれてしまう不具合があった。
+    """
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    result_from_tmp = default_cache_dir()
+
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+    result_from_elsewhere = default_cache_dir()
+
+    assert result_from_tmp == result_from_elsewhere
+    assert str(result_from_tmp).endswith(".cache/narou-dl")
 
 
 def _info(ncode: str = "n0000aa") -> NovelInfo:

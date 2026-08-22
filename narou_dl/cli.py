@@ -36,8 +36,8 @@
 
 既定では取得した本文・章立て・挿絵はキャッシュディレクトリに保存され、
 同じ作品を再度ダウンロードする際はキャッシュから読み込んでネットワークアクセスを省略する。
-キャッシュディレクトリは --cache-dir > 環境変数 XDG_CACHE_HOME > カレントディレクトリの
-./.narou-dl-cache の優先順位で決まる(詳細は cache.py を参照)。
+キャッシュディレクトリは --cache-dir > 環境変数 XDG_CACHE_HOME > ~/.cache/narou-dl
+の優先順位で決まる(詳細は cache.py を参照。CLI/GUI/.appバンドルで共通)。
 
 キャッシュ利用時は既定で目次から話ごとの最終更新日時を取得し、なろう側で
 本文が「改稿」された話だけを自動的に再取得する(--no-update-check で無効化可能)。
@@ -94,6 +94,7 @@ from .api import NarouAPI, NarouAPIError, polite_sleep
 from .aozora import build_novel_text
 from .aozoraepub3_backend import AozoraEpub3Error, build_epub_via_aozoraepub3
 from .cache import Cache
+from .config import CONFIG_KEYS, config_path, load_config, save_config
 from .epub_builder import build_epub
 from .image_fetch import download_images_for_aozora
 from .library import LIBRARY_OPTION_KEYS, Library
@@ -190,6 +191,8 @@ def run(argv: list[str] | None = None) -> int:
     Returns:
         終了コード。成功時は0、失敗時は1。
     """
+    saved = load_config()
+
     parser = argparse.ArgumentParser(
         description="小説家になろうの作品をダウンロードしてEPUBに変換する"
     )
@@ -208,21 +211,31 @@ def run(argv: list[str] | None = None) -> int:
         help="出力ファイル名 (省略時は作品タイトルから自動生成。.epub拡張子が無ければ自動付与する)",
     )
     parser.add_argument(
-        "--sleep", type=float, default=1.0, help="各話取得後の待機秒数 (既定: 1.0秒、サーバー負荷軽減のため)"
+        "--sleep", type=float, default=saved["sleep"],
+        help=f"各話取得後の待機秒数 (既定: {saved['sleep']}秒、サーバー負荷軽減のため)",
     )
     parser.add_argument("--start", type=int, default=1, help="開始話数 (既定: 1)")
     parser.add_argument("--end", type=int, default=None, help="終了話数 (既定: 最終話)")
+    # yoko/no-chapters/no-images/emit-aozora-txt*は既定値をconfig.jsonから
+    # 復元する。既定値がTrueの場合でも明示的に無効化できるよう、
+    # BooleanOptionalAction(--no-yoko等の否定形を自動生成)を使う。
+    # store_trueのままだと「常に真」な既定値を1回だけ偽に戻す手段が無く、
+    # --save-configで書き戻すたびに他方(GUI等)が設定した値を意図せず
+    # falseへ上書きしてしまうため。
     parser.add_argument(
-        "--yoko", action="store_true", help="横書きで生成する (既定は縦書き)"
+        "--yoko", action=argparse.BooleanOptionalAction, default=saved["yoko"],
+        help="横書きで生成する (既定は縦書き)",
     )
     parser.add_argument(
         "--no-chapters",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=saved["no_chapters"],
         help="章立て(「第一章」などの区切り)を取得せず、フラットな目次にする",
     )
     parser.add_argument(
         "--no-images",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=saved["no_images"],
         help="本文中の挿絵をダウンロード・埋め込みせず、取り除く",
     )
     parser.add_argument(
@@ -238,8 +251,7 @@ def run(argv: list[str] | None = None) -> int:
         "--cache-dir",
         help=(
             "キャッシュの保存先ディレクトリ (既定: 環境変数 XDG_CACHE_HOME が設定されて"
-            "いれば $XDG_CACHE_HOME/narou-dl、未設定ならカレントディレクトリの "
-            "./.narou-dl-cache)"
+            "いれば $XDG_CACHE_HOME/narou-dl、未設定なら ~/.cache/narou-dl)"
         ),
     )
     parser.add_argument(
@@ -250,7 +262,7 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend",
         choices=["ebooklib", "aozoraepub3"],
-        default="ebooklib",
+        default=saved["backend"],
         help=(
             "EPUB化バックエンド。既定は ebooklib(narou_dl自身がHTMLを直接EPUB化する)。"
             "タイトル・著者はOPFメタデータのみに持たせ、目次はEPUB標準のTOC機能経由で"
@@ -262,20 +274,24 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--aozoraepub3-jar",
         type=Path,
-        default=(Path(os.environ["AOZORAEPUB3_JAR"]) if os.environ.get("AOZORAEPUB3_JAR") else None),
+        default=(
+            Path(os.environ["AOZORAEPUB3_JAR"]) if os.environ.get("AOZORAEPUB3_JAR")
+            else (Path(saved["aozoraepub3_jar"]) if saved["aozoraepub3_jar"] else None)
+        ),
         help=(
             "--backend aozoraepub3 使用時に必須。AozoraEpub3(改造版)の.jarへのパス。"
-            "未指定時は環境変数 AOZORAEPUB3_JAR を使う"
+            "未指定時は環境変数 AOZORAEPUB3_JAR、それも無ければ設定ファイルの値を使う"
         ),
     )
     parser.add_argument(
         "--device",
-        default=None,
+        default=saved["device"],
         help="--backend aozoraepub3 使用時のみ有効。AozoraEpub3のデバイス最適化オプション(例: kindle)",
     )
     parser.add_argument(
         "--emit-aozora-txt",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=saved["emit_aozora_txt"],
         help=(
             "EPUB(ebooklibバックエンド)生成に加え、同じ話データから青空文庫記法の"
             "テキストファイル(出力ファイル名の拡張子を.txtにしたもの)も書き出す。"
@@ -284,7 +300,8 @@ def run(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--emit-aozora-txt-images",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=saved["emit_aozora_txt_images"],
         help=(
             "--emit-aozora-txt 使用時、挿絵もダウンロードして青空文庫記法の"
             "挿絵注記を含める(既定では挿絵注記は含めない)"
@@ -296,6 +313,15 @@ def run(argv: list[str] | None = None) -> int:
         help=(
             "生成後、macOSのFinderでEPUBファイルを選択状態で表示する"
             "(Finder上からダブルクリックで開けるようにする。macOS以外では無視される)"
+        ),
+    )
+    parser.add_argument(
+        "--save-config",
+        action="store_true",
+        help=(
+            "今回指定したオプション(縦横・バックエンド設定等)を既定値として"
+            "設定ファイルに保存する(次回以降のnarou-dl実行・GUI起動時にも適用される。"
+            "GUIとも共有される)。ncodeを省略すると保存のみ行いダウンロードはしない"
         ),
     )
     parser.add_argument(
@@ -339,8 +365,15 @@ def run(argv: list[str] | None = None) -> int:
         if not args.ncode:
             parser.error("--library-remove にはncodeの指定が必要です")
         return _library_remove(args.ncode, cache_dir_for_library)
+    if args.save_config and not args.ncode:
+        _save_current_config(args)
+        print(f"設定を保存しました -> {config_path()}")
+        return 0
     if not args.ncode:
-        parser.error("ncode を指定してください(または --update-all / --library-list)")
+        parser.error(
+            "ncode を指定してください"
+            "(または --update-all / --library-list / --save-config)"
+        )
 
     if args.backend == "aozoraepub3" and not args.aozoraepub3_jar:
         parser.error(
@@ -354,7 +387,23 @@ def run(argv: list[str] | None = None) -> int:
             "(aozoraepub3 バックエンドは既に青空文庫記法テキストを生成します)"
         )
 
+    if args.save_config:
+        _save_current_config(args)
+        print(f"設定を保存しました -> {config_path()}")
+
     return _download_and_build(args)
+
+
+def _save_current_config(args: argparse.Namespace) -> None:
+    """--save-config: 現在指定したオプションを設定ファイルに書き戻す。
+
+    CLI・GUIが同じ narou_dl.config を読み書きするため、ここで保存した
+    値は次回のCLI実行時の既定値になるのはもちろん、GUI起動時にも
+    (逆にGUI側で保存した値もCLI起動時に)反映される。
+    """
+    values = {key: getattr(args, key) for key in CONFIG_KEYS}
+    values["aozoraepub3_jar"] = str(values["aozoraepub3_jar"]) if values["aozoraepub3_jar"] else None
+    save_config(values)
 
 
 def _library_list(cache_dir: Path | None) -> int:

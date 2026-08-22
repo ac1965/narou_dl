@@ -3,8 +3,11 @@
 「ダウンロード」タブと「キャッシュ管理」タブを持つ。
 ダウンロードタブは複数ncode(1行1件)の一括ダウンロードに対応し、
 実行中はキャンセルボタンで次の話の境界まで待って中断できる。
-起動時に前回の主要オプション(縦横・バックエンド設定等)をQSettingsから
-復元し、ダウンロード開始時に保存する。
+起動時に前回の主要オプション(縦横・バックエンド設定等)を
+narou_dl.config(CLIと共有するconfig.json)から復元し、ダウンロード
+開始時に保存する。以前はQSettings(macOS固有のplist)に保存していたが、
+CLIとは別ストアになり設定が食い違っていたため、CLIと同じ
+narou_dl.configを使うように変更した。
 """
 from __future__ import annotations
 
@@ -12,7 +15,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..cli import extract_ncode
+from ..config import load_config, save_config
 from .cache_manager import CacheManagerWidget
 from .worker import DownloadOptions, DownloadWorker
 
@@ -51,6 +54,8 @@ class DownloadTab(QWidget):
         self._batch_index = 0
         self._batch_cancelled = False
         self._results: list[tuple[str, str, str]] = []  # (ncode, status, detail)
+        self._current_ncode: str | None = None
+        self._current_title: str | None = None
         self._build_ui()
         self._load_settings()
 
@@ -224,38 +229,33 @@ class DownloadTab(QWidget):
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(current)
 
-    # --- QSettings ---
+    # --- 設定の永続化(narou_dl.config、CLIと共有) ---
 
     def _load_settings(self) -> None:
-        settings = QSettings()
-        self.yoko_check.setChecked(settings.value("download/yoko", False, type=bool))
-        self.no_chapters_check.setChecked(settings.value("download/no_chapters", False, type=bool))
-        self.no_images_check.setChecked(settings.value("download/no_images", False, type=bool))
-        self.sleep_spin.setValue(float(settings.value("download/sleep", 1.0)))
-        self.backend_combo.setCurrentText(str(settings.value("download/backend", "ebooklib")))
-        self.jar_edit.setText(str(settings.value("download/aozoraepub3_jar", "")))
-        self.device_edit.setText(str(settings.value("download/device", "")))
-        self.emit_aozora_txt_check.setChecked(
-            settings.value("download/emit_aozora_txt", False, type=bool)
-        )
-        self.emit_aozora_txt_images_check.setChecked(
-            settings.value("download/emit_aozora_txt_images", False, type=bool)
-        )
+        config = load_config()
+        self.yoko_check.setChecked(bool(config["yoko"]))
+        self.no_chapters_check.setChecked(bool(config["no_chapters"]))
+        self.no_images_check.setChecked(bool(config["no_images"]))
+        self.sleep_spin.setValue(float(config["sleep"]))
+        self.backend_combo.setCurrentText(str(config["backend"]))
+        self.jar_edit.setText(config["aozoraepub3_jar"] or "")
+        self.device_edit.setText(config["device"] or "")
+        self.emit_aozora_txt_check.setChecked(bool(config["emit_aozora_txt"]))
+        self.emit_aozora_txt_images_check.setChecked(bool(config["emit_aozora_txt_images"]))
         self._update_backend_enabled()
 
     def _save_settings(self) -> None:
-        settings = QSettings()
-        settings.setValue("download/yoko", self.yoko_check.isChecked())
-        settings.setValue("download/no_chapters", self.no_chapters_check.isChecked())
-        settings.setValue("download/no_images", self.no_images_check.isChecked())
-        settings.setValue("download/sleep", self.sleep_spin.value())
-        settings.setValue("download/backend", self.backend_combo.currentText())
-        settings.setValue("download/aozoraepub3_jar", self.jar_edit.text())
-        settings.setValue("download/device", self.device_edit.text())
-        settings.setValue("download/emit_aozora_txt", self.emit_aozora_txt_check.isChecked())
-        settings.setValue(
-            "download/emit_aozora_txt_images", self.emit_aozora_txt_images_check.isChecked()
-        )
+        save_config({
+            "yoko": self.yoko_check.isChecked(),
+            "no_chapters": self.no_chapters_check.isChecked(),
+            "no_images": self.no_images_check.isChecked(),
+            "sleep": self.sleep_spin.value(),
+            "backend": self.backend_combo.currentText(),
+            "aozoraepub3_jar": self.jar_edit.text().strip() or None,
+            "device": self.device_edit.text().strip() or None,
+            "emit_aozora_txt": self.emit_aozora_txt_check.isChecked(),
+            "emit_aozora_txt_images": self.emit_aozora_txt_images_check.isChecked(),
+        })
 
     # --- ダウンロード開始・キューの進行 ---
 
@@ -286,7 +286,6 @@ class DownloadTab(QWidget):
         self.cancel_btn.setEnabled(True)
         self.ncode_edit.setEnabled(False)
         self.output_edit.setEnabled(False)
-        self.status_label.setVisible(self._batch_total > 1)
 
         self._start_next_in_queue()
 
@@ -317,9 +316,12 @@ class DownloadTab(QWidget):
             return
 
         ncode = self._queue.pop(0)
+        self._current_ncode = ncode
+        self._current_title = None
         self._batch_index += 1
+        self.status_label.setVisible(True)
+        self.status_label.setText(self._status_text(ncode))
         if self._batch_total > 1:
-            self.status_label.setText(f"全体の進捗: {self._batch_index}/{self._batch_total}件目 ({ncode})")
             self._append_log(f"\n=== [{self._batch_index}/{self._batch_total}] {ncode} ===")
 
         self.progress_bar.setRange(0, 1)
@@ -329,12 +331,25 @@ class DownloadTab(QWidget):
         self.worker = DownloadWorker(options)
         self.worker.log.connect(self._append_log)
         self.worker.progress.connect(self._on_progress)
+        self.worker.title_fetched.connect(lambda title, n=ncode: self._on_title_fetched(n, title))
         self.worker.finished_ok.connect(lambda path, n=ncode: self._on_item_finished(n, "ok", path))
         self.worker.finished_error.connect(
             lambda message, n=ncode: self._on_item_finished(n, "error", message)
         )
         self.worker.finished_cancelled.connect(lambda n=ncode: self._on_item_finished(n, "cancelled", ""))
         self.worker.start()
+
+    def _status_text(self, ncode: str, title: str | None = None) -> str:
+        target = ncode if not title else f"{ncode}({title})"
+        if self._batch_total > 1:
+            return f"全体の進捗: {self._batch_index}/{self._batch_total}件目 {target}"
+        return f"ダウンロード中: {target}"
+
+    def _on_title_fetched(self, ncode: str, title: str) -> None:
+        if ncode != self._current_ncode:
+            return  # 既にキャンセル・次の作品へ進んだ後に届いた古いシグナルは無視する
+        self._current_title = title
+        self.status_label.setText(self._status_text(ncode, title))
 
     def _on_item_finished(self, ncode: str, status: str, detail: str) -> None:
         self._results.append((ncode, status, detail))
