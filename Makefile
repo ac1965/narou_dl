@@ -14,19 +14,22 @@ VENV_APP := .venv-app-build
 
 INSTALL_DIR ?= /Applications
 
-.PHONY: help setup-cli setup-gui run run-gui app install-app uninstall-app test clean distclean
+.PHONY: help setup-cli setup-gui run run-gui app install-app uninstall-app \
+        install uninstall test clean distclean
 
 help:
-	@echo "make setup-cli  : narou-dl(CLI)用の仮想環境 $(VENV_CLI) を作りインストールする"
+	@echo "make setup-cli  : narou-dl(CLI)用の仮想環境 $(VENV_CLI) を作りインストールする(開発・テスト用)"
 	@echo "make setup-gui  : narou-dl-gui用の仮想環境 $(VENV_GUI) を作りインストールする"
 	@echo "make run ARGS='N9669BK --yoko' : CLI版を実行する"
 	@echo "make run-gui    : GUI版を起動する"
 	@echo "make app        : macOS用 dist/narou-dl.app をビルドする"
 	@echo "make install-app: dist/narou-dl.app を $(INSTALL_DIR) にインストールする(無ければ先にビルドする)"
 	@echo "make uninstall-app: $(INSTALL_DIR)/narou-dl.app を削除する"
+	@echo "make install    : narou-dlをpyenvのグローバル環境に直接インストールする(venv不要でどこからでも使える)"
+	@echo "make uninstall  : pyenvのグローバル環境からnarou-dlをアンインストールする"
 	@echo "make test       : pytestでテストスイートを実行する"
-	@echo "make clean      : __pycache__・各種キャッシュディレクトリを削除する"
-	@echo "make distclean  : clean に加えて仮想環境・ビルド成果物も全て削除する"
+	@echo "make clean      : リポジトリ内の一時ファイル(__pycache__・各種キャッシュディレクトリ)を削除する"
+	@echo "make distclean  : clean に加えて仮想環境・ビルド成果物・pyenvグローバルへのインストールも全て削除する"
 
 $(VENV_CLI)/bin/python:
 	$(PYTHON) -m venv $(VENV_CLI)
@@ -87,6 +90,21 @@ uninstall-app:
 	rm -rf "$(INSTALL_DIR)/narou-dl.app"
 	@echo "-> $(INSTALL_DIR)/narou-dl.app を削除しました"
 
+# --- pyenvグローバル環境への直接インストール ---
+#
+# setup-cli/setup-guiが作る隔離仮想環境(.venv/.venv-gui)とは別に、
+# venvをactivateせずシェルからそのまま`narou-dl`を使いたい場合の実運用
+# 向けインストール。$(PYTHON)(既定はPATH上のpython3、pyenv環境下では
+# pyenv shim経由でpyenvが管理する現在のバージョンに解決される)へ
+# editableインストールする。
+install:
+	$(PYTHON) -m pip install --upgrade pip
+	$(PYTHON) -m pip install -e .
+	@echo "-> narou-dl ($$($(PYTHON) -c 'import sys; print(sys.prefix)'))"
+
+uninstall:
+	-$(PYTHON) -m pip uninstall -y narou-dl
+
 test: $(VENV_CLI)/bin/python
 	$(VENV_CLI)/bin/pip install -e ".[dev]"
 	$(VENV_CLI)/bin/pytest
@@ -96,7 +114,7 @@ clean:
 	find . -name "*.pyc" -delete
 	rm -rf .pytest_cache .mypy_cache .ruff_cache docs/_build
 
-distclean: clean
+distclean: clean uninstall
 	rm -rf $(VENV_CLI) $(VENV_GUI) $(VENV_APP)
 	rm -rf build dist narou_dl.egg-info
 	rm -rf .narou-dl-cache
