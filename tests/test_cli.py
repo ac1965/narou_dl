@@ -61,6 +61,47 @@ def test_save_config_persists_across_separate_run_calls(monkeypatch, tmp_path):
     assert load_config()["emit_aozora_txt"] is True
 
 
+def test_no_chapters_flag_saves_true(monkeypatch, tmp_path):
+    """回帰テスト: argparse.BooleanOptionalActionは"--no-"で始まるフラグ名
+    (--no-chapters)自体と組み合わせると、そのフラグ自身も自動生成される
+    否定形(--no-no-chapters)も両方Falseと判定してしまい、Trueにする手段が
+    無くなる不具合があった(実機で発覚)。store_true/store_falseを
+    別オプション(--no-chapters/--chapters)に分ける方式で修正した。
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    run(["--save-config", "--no-chapters"])
+
+    assert load_config()["no_chapters"] is True
+
+
+def test_chapters_flag_overrides_saved_no_chapters_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    run(["--save-config", "--no-chapters"])
+    assert load_config()["no_chapters"] is True
+
+    # 既定値がTrueになっていても、--chaptersで今回だけFalseに戻せること
+    run(["--save-config", "--chapters"])
+    assert load_config()["no_chapters"] is False
+
+
+def test_no_images_flag_saves_true(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    run(["--save-config", "--no-images"])
+
+    assert load_config()["no_images"] is True
+
+
+def test_images_flag_overrides_saved_no_images_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    run(["--save-config", "--no-images"])
+    assert load_config()["no_images"] is True
+
+    run(["--save-config", "--images"])
+    assert load_config()["no_images"] is False
+
+
 def test_missing_ncode_without_management_flags_is_a_usage_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 

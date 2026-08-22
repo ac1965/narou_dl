@@ -226,17 +226,40 @@ def run(argv: list[str] | None = None) -> int:
         "--yoko", action=argparse.BooleanOptionalAction, default=saved["yoko"],
         help="横書きで生成する (既定は縦書き)",
     )
+    # --no-chapters/--no-imagesはargparse.BooleanOptionalActionと組み合わせられない。
+    # BooleanOptionalActionは「渡されたオプション文字列が"--no-"で始まるか否か」だけで
+    # 真偽を決めるため、フラグ名自体が既に"--no-"で始まっていると、
+    # 本来のフラグ(--no-chapters)も自動生成される否定形(--no-no-chapters)も
+    # 両方Falseと判定されてしまい、Trueにする手段が無くなる(実機検証で確認)。
+    # そのため同じdestを共有する2つのaction(store_true/store_false)に分け、
+    # 上書き用の方はdefault=argparse.SUPPRESSにして既定値の登録を委ねる。
     parser.add_argument(
         "--no-chapters",
-        action=argparse.BooleanOptionalAction,
+        dest="no_chapters",
+        action="store_true",
         default=saved["no_chapters"],
-        help="章立て(「第一章」などの区切り)を取得せず、フラットな目次にする",
+        help=f"章立て(「第一章」などの区切り)を取得せず、フラットな目次にする (既定: {saved['no_chapters']})",
+    )
+    parser.add_argument(
+        "--chapters",
+        dest="no_chapters",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="--no-chaptersが既定で有効になっている場合、今回だけ章立てを取得する",
     )
     parser.add_argument(
         "--no-images",
-        action=argparse.BooleanOptionalAction,
+        dest="no_images",
+        action="store_true",
         default=saved["no_images"],
-        help="本文中の挿絵をダウンロード・埋め込みせず、取り除く",
+        help=f"本文中の挿絵をダウンロード・埋め込みせず、取り除く (既定: {saved['no_images']})",
+    )
+    parser.add_argument(
+        "--images",
+        dest="no_images",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="--no-imagesが既定で有効になっている場合、今回だけ挿絵を埋め込む",
     )
     parser.add_argument(
         "--no-cache", action="store_true", help="キャッシュを使わず、常にネットワークから取得する"

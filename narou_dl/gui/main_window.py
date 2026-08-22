@@ -1,6 +1,6 @@
 """narou_dl GUIのメインウィンドウ。
 
-「ダウンロード」タブと「キャッシュ管理」タブを持つ。
+「ダウンロード」「キャッシュ管理」「ライブラリ」の3タブを持つ。
 ダウンロードタブは複数ncode(1行1件)の一括ダウンロードに対応し、
 実行中はキャンセルボタンで次の話の境界まで待って中断できる。
 起動時に前回の主要オプション(縦横・バックエンド設定等)を
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from ..cli import extract_ncode
 from ..config import load_config, save_config
 from .cache_manager import CacheManagerWidget
+from .library_manager import LibraryManagerWidget
 from .worker import DownloadOptions, DownloadWorker
 
 
@@ -110,6 +111,9 @@ class DownloadTab(QWidget):
         self.no_cache_check = QCheckBox("キャッシュを使わない")
         self.refresh_check = QCheckBox("キャッシュを無視して取り直す")
         self.clear_cache_check = QCheckBox("この作品のキャッシュを削除してから取得する")
+        self.library_add_check = QCheckBox(
+            "この作品をライブラリに登録する(CLIの--update-allで追跡・一括更新できるようになる)"
+        )
         for chk in (
             self.yoko_check,
             self.no_chapters_check,
@@ -117,6 +121,7 @@ class DownloadTab(QWidget):
             self.no_cache_check,
             self.refresh_check,
             self.clear_cache_check,
+            self.library_add_check,
         ):
             opts_layout.addWidget(chk)
         layout.addWidget(opts_group)
@@ -308,6 +313,7 @@ class DownloadTab(QWidget):
             device=self.device_edit.text().strip() or None,
             emit_aozora_txt=self.emit_aozora_txt_check.isChecked(),
             emit_aozora_txt_images=self.emit_aozora_txt_images_check.isChecked(),
+            library_add=self.library_add_check.isChecked(),
         )
 
     def _start_next_in_queue(self) -> None:
@@ -439,4 +445,12 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(DownloadTab(), "ダウンロード")
         tabs.addTab(CacheManagerWidget(), "キャッシュ管理")
+        tabs.addTab(LibraryManagerWidget(), "ライブラリ")
+        # キャッシュ管理・ライブラリタブはウィジェット生成時に一度読み込むだけで、
+        # 他のタブ(ダウンロード完了時のキャッシュ保存・ライブラリ登録)による
+        # 変更を自動では検知しない。タブを表示するたびに再読み込みすることで、
+        # 「ダウンロードタブで登録したのにライブラリタブに出ない」事態を防ぐ。
+        tabs.currentChanged.connect(
+            lambda index: getattr(tabs.widget(index), "refresh", lambda: None)()
+        )
         self.setCentralWidget(tabs)

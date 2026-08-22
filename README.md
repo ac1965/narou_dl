@@ -31,14 +31,18 @@ make setup-cli
 | `make app` | macOS用 `dist/narou-dl.app` をビルドする([該当節](#appバンドルのビルドpy2app)参照) |
 | `make install-app` | `dist/narou-dl.app` を `/Applications` にインストールする(無ければ先にビルドする) |
 | `make uninstall-app` | インストールした `narou-dl.app` を削除する |
+| `make install` | `narou-dl`をpyenv等のグローバルなPython環境に直接インストールする(venv不要でどこからでも使える) |
+| `make uninstall` | グローバル環境から`narou-dl`をアンインストールする |
 | `make test` | pytestでテストスイートを実行する |
-| `make clean` | `__pycache__`・各種キャッシュディレクトリを削除する |
-| `make distclean` | `clean`に加え仮想環境・ビルド成果物も含めて全て削除する |
+| `make clean` | リポジトリ内の一時ファイル(`__pycache__`・各種キャッシュディレクトリ)を削除する |
+| `make distclean` | `clean`・`uninstall`に加え仮想環境・ビルド成果物も含めて全て削除する |
 
-CLI/GUI/`.app`ビルドの仮想環境(`.venv/` `.venv-gui/` `.venv-app-build/`)を
+`setup-cli`/`setup-gui`/`app`の仮想環境(`.venv/` `.venv-gui/` `.venv-app-build/`)を
 分けているのは、それぞれが必要とする依存(特にGUIのPySide6は数百MB)を
-混在させないため。Makefileを使わず直接インストールする場合は
-`pip install -e .`(CLI)/ `pip install -e ".[gui]"`(GUI)でも構わない。
+混在させないため(開発・テスト向け)。venvをactivateせず普段使いの
+シェルからそのまま`narou-dl`を使いたい場合は`make install`を使う。
+Makefileを使わず直接インストールする場合は`pip install -e .`(CLI)/
+`pip install -e ".[gui]"`(GUI)でも構わない。
 
 ## CLIの使い方
 
@@ -91,9 +95,11 @@ narou-dl --save-config --yoko --backend aozoraepub3 --aozoraepub3-jar /path/to/A
 narou-dl N9669BK --save-config --sleep 2.0
 ```
 
-`--yoko`など、設定ファイルの既定値が`true`になっている項目を1回だけ
-無効化したい場合は`--no-yoko`のように否定形を指定する(`--help`で
-`--no-chapters, --no-no-chapters`のように表示される項目も同様)。
+設定ファイルの既定値が`true`になっている項目を1回だけ元に戻したい場合は
+否定形のオプションを指定する。`--yoko`/`--emit-aozora-txt`/
+`--emit-aozora-txt-images`は`--no-yoko`のように`--no-`を付けた形、
+`--no-chapters`/`--no-images`はそれぞれ`--chapters`/`--images`
+(二重否定`--no-no-chapters`にはしていない)。
 
 ### EPUB化バックエンド
 
@@ -147,8 +153,10 @@ make run-gui
 | キャンセル | ダウンロード中は「キャンセル」ボタンで中断できる(現在取得中の話の完了を待ってから止まる協調的キャンセル)。一括ダウンロード中にキャンセルすると残りのキューも実行されない |
 | バックエンド選択 | `ebooklib`(既定)/`aozoraepub3`をGUIから選択できる。`aozoraepub3`選択時は`.jar`パス・デバイス最適化オプションを指定できる。`ebooklib`選択時は`--emit-aozora-txt`相当のオプションも利用できる |
 | 設定の保存 | 主要オプション(縦横・バックエンド設定等)は`~/.config/narou-dl/config.json`に保存され、次回起動時に復元される。CLIの`--save-config`と同じファイルを共有するため、どちらで変更してももう一方に反映される(詳細は「CLIの使い方」内の既定オプション保存の節を参照) |
+| ライブラリに登録 | ダウンロードタブの「この作品をライブラリに登録する」にチェックすると、CLIの`--library-add`と同様に今回のオプションと共に登録される |
 | Finderで表示 | ダウンロード完了ダイアログの「Finderで表示」ボタンから、生成したEPUB(一括ダウンロード時は出力フォルダ)をFinderで開ける |
 | キャッシュ管理タブ | `cache.py`が作品ごとに作るキャッシュディレクトリを一覧表示し、作品単位での削除・全削除・Finderで開く操作ができる |
+| ライブラリタブ | 登録済み作品を一覧表示(`--library-list`相当)し、選択項目の削除(`--library-remove`相当)、選択項目または全件の更新(`--update-all`相当。登録時のオプションのまま再実行する)ができる |
 
 ### .appバンドルのビルド(py2app)
 
@@ -225,6 +233,11 @@ mv pyproject.toml.bak pyproject.toml
    - `--update-all`で登録済みの全作品を登録時のオプションのまままとめて
      再取得できる(実際の取得処理自体はキャッシュ機構をそのまま利用するため、
      新規話・改稿された話だけが効率的に取得される)
+6. **設定** (`narou_dl/config.py`)
+   - 縦横・EPUB化バックエンド・待機秒数などの既定オプションを
+     `~/.config/narou-dl/config.json`に保存する
+   - CLI(`--save-config`)・GUIのどちらから保存しても同じファイルを読み書きするため、
+     設定が食い違わない
 
 ## テスト
 
