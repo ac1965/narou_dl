@@ -5,7 +5,10 @@ build/
 dist/
 *.epub
 .venv/
+.venv-gui/
+.venv-app-build/
 venv/
+pyproject.toml.bak
 .narou-dl-cache/
 docs/_build/
 .DS_Store

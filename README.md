@@ -4,7 +4,15 @@
 
 ## セットアップ
 
-このディレクトリ(`pyproject.toml`があるフォルダ)で以下を実行してください。
+このディレクトリ(`pyproject.toml`があるフォルダ)で`make setup-cli`を
+実行すると、専用の仮想環境(`.venv/`)を作ってインストールします。
+
+```bash
+make setup-cli
+.venv/bin/narou-dl N9669BK
+```
+
+Makefileを使わず直接インストールする場合は以下でも構いません。
 
 ```bash
 pip install -e .
@@ -18,6 +26,21 @@ pip install -e .
 pip install requests beautifulsoup4 ebooklib
 python -m narou_dl N9669BK
 ```
+
+### Makefile
+
+| コマンド | 内容 |
+| --- | --- |
+| `make setup-cli` | CLI(`narou-dl`)用の仮想環境 `.venv/` を作りインストールする |
+| `make setup-gui` | GUI(`narou-dl-gui`)用の仮想環境 `.venv-gui/` を作りインストールする |
+| `make run ARGS='N9669BK --yoko'` | `.venv/`のCLIを実行する |
+| `make run-gui` | `.venv-gui/`のGUIを起動する |
+| `make app` | macOS用 `dist/narou-dl.app` をビルドする(後述) |
+| `make clean` | `__pycache__`・各種キャッシュディレクトリを削除する |
+| `make distclean` | `clean`に加え仮想環境・ビルド成果物も含めて全て削除する |
+
+CLIとGUIの仮想環境を分けているのは、GUIのみが必要とするPySide6
+(数百MB)をCLI用環境に持ち込まないため。
 
 ## 使い方
 
@@ -68,6 +91,69 @@ ncode は作品URL (`https://ncode.syosetu.com/n9669bk/`) の `n9669bk` の部�
 大文字・小文字どちらでも指定できます。
 
 `-o` に `.epub` 拡張子を付けずに指定した場合は自動的に付与されます。
+
+## GUIアプリ(macOS)
+
+CLIと同じダウンロード処理をPySide6製のGUIから使えます。
+
+```bash
+make setup-gui
+make run-gui
+```
+
+Makefileを使わない場合:
+
+```bash
+pip install -e ".[gui]"
+narou-dl-gui
+# またはインストールせずに
+python -m narou_dl.gui
+```
+
+- **ダウンロードタブ**: ncodeと出力先、取得範囲(開始/終了話数・待機時間)、
+  縦書き/横書きなどの主要オプションを指定して実行できます。進捗バーと
+  ログ表示で取得状況を確認できます(内部の処理はCLIの`run()`と共通)。
+- **キャッシュ管理タブ**: `cache.py` が作品ごとに作るキャッシュディレクトリを
+  一覧表示し、作品単位での削除・全削除・Finderで開く操作ができます。
+
+### .appバンドルのビルド(py2app)
+
+`py2app`で`narou-dl.app`を作れる。PySide6は多数の未使用フレームワーク
+(QtWebEngine等)を含むため、素の`py2app`ビルドは1GB超になる。
+`scripts/trim_macos_bundle.py`でこのアプリが実際に使うQtモジュールだけに
+絞り込み、Qtプラグインの参照先修正・再署名まで行うと約200MBになる。
+
+汚染されていないクリーンな仮想環境(pandas等の無関係なパッケージが
+入っていない環境)でビルドすることを強く推奨する。dev環境に大量の
+パッケージが入っていると、py2appがそれらを巻き込んで検出してしまい、
+サイズ増大や無関係なパッケージの署名エラーの原因になる。そのため
+`make app`は専用の仮想環境`.venv-app-build/`を都度作り直してビルドする
+(`.venv/`や`.venv-gui/`とは共有しない)。
+
+```bash
+make app
+open dist/narou-dl.app
+```
+
+`make app`は内部で以下を行っている(直接実行したい場合の参考):
+
+```bash
+python3 -m venv .venv-app-build
+.venv-app-build/bin/pip install .
+.venv-app-build/bin/pip install "PySide6>=6.5" py2app
+
+# setup.py はpy2app専用で、pyproject.tomlの[project]と併存すると
+# py2appが依存関係(install_requires)を検出してエラーになるため、
+# ビルド中だけ一時的にpyproject.tomlを退避する
+mv pyproject.toml pyproject.toml.bak
+.venv-app-build/bin/python setup.py py2app
+mv pyproject.toml.bak pyproject.toml
+
+.venv-app-build/bin/python scripts/trim_macos_bundle.py dist/narou-dl.app
+```
+
+生成物は`dist/narou-dl.app`(中間ファイルは`build/`)。`make distclean`で
+`.venv-app-build/`ごと削除できる。
 
 ## 仕組み
 

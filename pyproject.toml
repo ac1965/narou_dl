@@ -19,9 +19,15 @@ docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",
 ]
+gui = [
+    "PySide6>=6.5",
+]
 
 [project.scripts]
 narou-dl = "narou_dl.cli:main"
 
+[project.gui-scripts]
+narou-dl-gui = "narou_dl.gui.app:main"
+
 [tool.setuptools]
-packages = ["narou_dl"]
+packages = ["narou_dl", "narou_dl.gui"]
