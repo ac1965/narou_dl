@@ -1,558 +1,1118 @@
-"""取得済みの話データから縦書き(または横書き)PDFを生成するバックエンド。
+"""生成済みEPUBをChromium(Playwright)で描画してPDFに変換する。
 
-narou_dl自身が持つEpisode.paragraphs(scraper.pyが生成する、ルビ・挿絵・傍点を
-保持した安全なHTML断片)を直接レイアウトする、Pure Python(ReportLabのみ)の
-縦書き組版エンジン。外部ツール(Calibre/wkhtmltopdf等)は一切使わない。
+以前はReportLabで文字単位のマス目に配置する独自の縦書き組版エンジンを
+実装していたが、半角英字・長音記号(ー)が正しく回転しない既知のバグを
+解消できなかった。EPUBのXHTML/CSSをそのままChromiumに渡して描画させれば、
+縦書き・ルビ・禁則処理はブラウザのネイティブ実装がすべて正しく処理して
+くれるため、そちらに置き換えた。
 
-WeasyPrint(pip一発で入るHTML/CSSレンダラー)を検証したところ、日本語フォント
-自体は正しく描画できたが `writing-mode: vertical-rl` が完全に無視され横書きに
-フォールバックすることを実機で確認した(2024年時点のWeasyPrintの既知の制約)。
-そのためHTML/CSSレンダラーには頼らず、文字単位でマス目に配置する専用の
-縦書きレイアウトエンジンをここに実装している。
+設計方針:
+    - EPUBのXHTML/CSSはできるだけそのまま利用する。ルビ・禁則処理は
+      Chromiumのレイアウトエンジンに任せ、こちらでは実装しない。
+    - 書字方向(縦書き/横書き)・判型・余白は、まずEPUB自身のCSS
+      (`@page` / `html, body` の `writing-mode`)から検出し、検出でき
+      なかった項目だけを引数の既定値で補う(EPUBのCSSを強制上書きしない)。
+    - ページ番号はChromiumの `@page` マージンボックスに頼らず、生成後の
+      PDFにReportLab+pypdfで別途重ね書きする。
 
-フォントはReportLab組み込みのAdobe標準日本語CIDフォント(HeiseiMin-W3/
-HeiseiKakuGo-W5)を使う。実際のグリフはPDFに埋め込まれず、閲覧側(Preview.app・
-Adobe Acrobat等、日本語フォントを持つ環境)が補完する方式のため、フォント
-ファイルの同梱が一切不要(pip install reportlabのみで完結する)。
-
-既知の制約(v1のスコープ):
-    - 「」()等の約物は縦書き用の回転グリフではなく横書きのまま描画される
-      (ReportLabの非埋め込みCIDフォントはOpenTypeの縦書き用グリフ差し替え
-      (vert機能)に対応していないため)。
-    - 半角英字・長音記号(ー)も直立のまま描画する(縦書きの正式な組版では
-      90度回転させるのが一般的だが、reportlab 5.0.1で
-      saveState()/rotate()/restoreState()を使って回転描画すると、直前に
-      別の回転描画が1回でもあった場合に限って以降の回転が反映されなくなる
-      現象を実機で確認した。生成されるPDFの内容ストリーム自体は正常に
-      回転する箇所と構造的に同一で、Poppler・PyMuPDF両方で同じ結果になる
-      ため、こちら側の実装ミスというよりreportlab側の狭い条件でのみ
-      再現する問題と判断し、深追いのコストに見合わないため直立のまま
-      描画する形に留めている)。
-    - 禁則処理(行頭禁則・行末禁則)は簡易版(1文字の押し出しのみ、連鎖なし)。
-    - ルビの文字間隔調整(モノルビ/グループルビの均等割り付け)は行わず、
-      対象文字の縦幅に単純に均等配置する。
-    - 挿絵は本文中への回り込みはせず、専用の1ページを使って中央に配置する。
+要 `pip install -e ".[pdf]"` に加えて `python -m playwright install chromium`
+(Chromium本体はpipのインストール対象に含まれないため別途必要)。
 """
+
 from __future__ import annotations
 
+import asyncio
 import re
-import sys
+import tempfile
+import warnings
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from urllib.parse import unquote, urlparse
 
-import requests
-from bs4 import BeautifulSoup, NavigableString, Tag
-from reportlab.lib.units import mm
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
+from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.pdfgen.canvas import Canvas
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
 
-from .api import USER_AGENT, NovelInfo
-from .scraper import Episode
-
-if TYPE_CHECKING:
-    from .cache import Cache
-
-FONT_MINCHO = "HeiseiMin-W3"
-FONT_GOTHIC = "HeiseiKakuGo-W5"
-_FONTS_REGISTERED = False
+from playwright.async_api import async_playwright
 
 
-def _ensure_fonts_registered() -> None:
-    global _FONTS_REGISTERED
-    if _FONTS_REGISTERED:
-        return
-    pdfmetrics.registerFont(UnicodeCIDFont(FONT_MINCHO))
-    pdfmetrics.registerFont(UnicodeCIDFont(FONT_GOTHIC))
-    _FONTS_REGISTERED = True
+class PdfEngineError(RuntimeError):
+    """Chromiumでの変換に失敗した場合に送出する(Chromium本体が未インストール、
+    EPUBの構造が壊れている等)。playwright自体が未インストールの場合は
+    このモジュールのimport自体が通常のImportErrorになる(呼び出し側で
+    ハンドリングする)。"""
 
 
-# --- 段落HTMLの解析(scraper.pyが生成する安全なHTML断片が対象) ---
+# ----------------------------------------------------------------------
+# EPUB: OPF / manifest / spine
+# ----------------------------------------------------------------------
 
-_DIGIT_RUN_RE = re.compile(r"[0-9]{1,4}")
-_CANNOT_START_COLUMN = set("」』)]〉》】〕、。,.!?！？ー…ゝゞぁぃぅぇぉっゃゅょァィゥェォッャュョ・：；")
-_CANNOT_END_COLUMN = set("「『([〈《【〔")
+def find_opf(epub_dir: Path) -> Path:
+    container = epub_dir / "META-INF" / "container.xml"
 
+    soup = BeautifulSoup(
+        container.read_text(encoding="utf-8"),
+        "xml",
+    )
 
-@dataclass
-class _Atom:
-    """1文字(またはtcyでまとめた数字列)分の描画単位。"""
+    rootfile = soup.find("rootfile")
 
-    text: str
-    kind: str  # "char" | "tcy" | "latin"
+    if rootfile is None:
+        raise RuntimeError("EPUB container.xml に OPF がありません")
 
+    full_path = rootfile.get("full-path")
 
-@dataclass
-class PlainSegment:
-    atoms: list[_Atom]
+    if not full_path:
+        raise RuntimeError("OPF の full-path がありません")
+
+    return epub_dir / full_path
 
 
 @dataclass
-class RubySegment:
-    atoms: list[_Atom]
-    ruby: str
+class ManifestItem:
+    path: Path
+    media_type: str
+    properties: str
 
 
 @dataclass
-class BoutenSegment:
-    atoms: list[_Atom]
+class EpubDocument:
+    opf: Path
+    opf_soup: BeautifulSoup
+    manifest: dict[str, ManifestItem]
+    spine: list[Path]
+    spine_ids: list[str]
+    cover: Path | None
+    toc_entries: list[dict]
 
 
-@dataclass
-class ImageSegment:
-    url: str
+def _resolve_href(base_dir: Path, href: str) -> Path:
+    parsed = urlparse(href)
+
+    return (base_dir / unquote(parsed.path)).resolve()
 
 
-Segment = Union[PlainSegment, RubySegment, BoutenSegment, ImageSegment]
+def parse_epub(epub_dir: Path) -> EpubDocument:
+    opf = find_opf(epub_dir)
+    opf_dir = opf.parent
 
+    soup = BeautifulSoup(
+        opf.read_text(encoding="utf-8"),
+        "xml",
+    )
 
-def _atomize(text: str) -> list[_Atom]:
-    """プレーンテキストを描画単位(_Atom)のリストに分解する。
+    manifest: dict[str, ManifestItem] = {}
 
-    半角数字の連続(1〜4桁)はtcy(縦中横)として1つのAtomにまとめ、
-    それ以外の半角英字は回転描画対象("latin")、それ以外は通常文字として扱う。
-    """
-    atoms: list[_Atom] = []
-    i = 0
-    while i < len(text):
-        m = _DIGIT_RUN_RE.match(text, i)
-        if m:
-            atoms.append(_Atom(m.group(), "tcy"))
-            i = m.end()
-            continue
-        ch = text[i]
-        if ch.isascii() and ch.isalpha():
-            atoms.append(_Atom(ch, "latin"))
-        else:
-            atoms.append(_Atom(ch, "char"))
-        i += 1
-    return atoms
+    for item in soup.find_all("item"):
+        item_id = item.get("id")
+        href = item.get("href")
+        media_type = item.get("media-type") or ""
 
-
-def _parse_paragraph(html: str) -> list[Segment]:
-    """段落1つ分のHTML断片(scraper.pyが生成する安全なHTML)をSegment列にする。
-
-    対応するタグ: <ruby><rt>...</rt></ruby>(ルビ)、
-    <em class="emphasisDots">(傍点)、<img src="...">(挿絵)、<br/>(空行)。
-    """
-    if not html.strip():
-        return [PlainSegment(_atomize("　"))]  # 空行は全角スペース1文字扱い
-
-    soup = BeautifulSoup(f"<span>{html}</span>", "html.parser")
-    root = soup.span
-    segments: list[Segment] = []
-
-    def walk(node) -> None:
-        if isinstance(node, NavigableString):
-            text = str(node)
-            if text:
-                segments.append(PlainSegment(_atomize(text)))
-            return
-        if not isinstance(node, Tag):
-            return
-        if node.name == "img":
-            src = node.get("src")
-            if src:
-                segments.append(ImageSegment(src))
-            return
-        if node.name == "br":
-            return
-        if node.name == "ruby":
-            rt_tag = node.find("rt")
-            ruby_text = rt_tag.get_text() if rt_tag else ""
-            base_text = "".join(
-                c.get_text() if isinstance(c, Tag) else str(c)
-                for c in node.contents
-                if not (isinstance(c, Tag) and c.name in ("rt", "rp"))
+        if item_id and href:
+            manifest[item_id] = ManifestItem(
+                path=_resolve_href(opf_dir, href),
+                media_type=media_type,
+                properties=item.get("properties", "") or "",
             )
-            if base_text:
-                segments.append(RubySegment(_atomize(base_text), ruby_text))
-            return
-        if node.name == "em" and "emphasisDots" in (node.get("class") or []):
-            segments.append(BoutenSegment(_atomize(node.get_text())))
-            return
-        for child in node.contents:
-            walk(child)
 
-    for child in root.contents:
-        walk(child)
-    return segments
+    spine_tag = soup.find("spine")
 
+    if spine_tag is None:
+        raise RuntimeError("EPUB に spine がありません")
 
-# --- 縦書きレイアウトエンジン ---
+    spine = []
+    spine_ids = []
 
+    for itemref in spine_tag.find_all("itemref"):
+        idref = itemref.get("idref")
 
-@dataclass
-class _PageGeometry:
-    page_width: float
-    page_height: float
-    margin: float
-    font_size: float
-    ruby_font_size: float
-    column_pitch: float  # 列(行)の間隔。ルビ用のガター込み
+        if idref not in manifest:
+            continue
 
-    @property
-    def top_y(self) -> float:
-        return self.page_height - self.margin
+        item = manifest[idref]
 
-    @property
-    def bottom_y(self) -> float:
-        return self.margin
+        if item.media_type in (
+            "application/xhtml+xml",
+            "text/html",
+        ):
+            spine.append(item.path)
+            spine_ids.append(idref)
 
-    @property
-    def column_height(self) -> float:
-        return self.top_y - self.bottom_y
+    if not spine:
+        raise RuntimeError("EPUBのspineにXHTMLがありません")
 
-    @property
-    def rows_per_column(self) -> int:
-        return max(1, int(self.column_height // self.font_size))
+    cover = find_cover_image(soup, manifest, opf_dir)
 
-    @property
-    def first_column_right_x(self) -> float:
-        return self.page_width - self.margin
+    toc_entries = find_toc_entries(
+        soup,
+        manifest,
+        spine_tag,
+    )
 
-
-def _default_geometry(vertical: bool, font_size: float = 11.5) -> _PageGeometry:
-    # 一般的な文庫本に近いB6サイズ(128mm x 182mm)を既定とする。
-    width, height = 128 * mm, 182 * mm
-    if not vertical:
-        # 横書きの場合はページを回転させ、横長ではなく引き続き縦長のまま
-        # 上→下・左→右で読む一般的な書籍レイアウトにする。
-        pass
-    return _PageGeometry(
-        page_width=width,
-        page_height=height,
-        margin=14 * mm,
-        font_size=font_size,
-        ruby_font_size=font_size * 0.5,
-        column_pitch=font_size * 1.7,
+    return EpubDocument(
+        opf=opf,
+        opf_soup=soup,
+        manifest=manifest,
+        spine=spine,
+        spine_ids=spine_ids,
+        cover=cover,
+        toc_entries=toc_entries,
     )
 
 
-class _VerticalWriter:
-    """縦書きPDFへの実際の描画を担当するクラス。
+# ----------------------------------------------------------------------
+# EPUB: cover image
+# ----------------------------------------------------------------------
 
-    段落単位でSegment列を受け取り、文字をマス目に配置しながら
-    列(行)・ページを自動的に進める。1段落は必ず新しい列から始まる
-    (なろうの1行=1<p>を、縦書きの1行=1列に対応させるため)。
+def find_cover_image(
+    opf_soup: BeautifulSoup,
+    manifest: dict[str, ManifestItem],
+    opf_dir: Path,
+) -> Path | None:
+    """
+    EPUBの表紙画像を解決する(EPUB2/EPUB3両対応)。
     """
 
-    def __init__(self, canvas: Canvas, geometry: _PageGeometry):
-        self.canvas = canvas
-        self.geo = geometry
-        self.column_index = 0  # ページ内での列番号(0始まり、右端が0)
-        self.row_index = 0  # 現在の列内での行(文字)番号
-        self._page_has_content = False
+    # EPUB3: manifest item with properties="cover-image"
+    for item in manifest.values():
+        if "cover-image" in item.properties.split():
+            if item.path.exists():
+                return item.path
 
-    # --- 座標計算 ---
+    # EPUB2: <meta name="cover" content="some-manifest-id"/>
+    meta_cover = opf_soup.find(
+        "meta",
+        attrs={"name": "cover"},
+    )
 
-    def _column_right_x(self, column_index: int) -> float:
-        return self.geo.first_column_right_x - column_index * self.geo.column_pitch
+    if meta_cover:
+        content_id = meta_cover.get("content")
 
-    def _row_center_y(self, row_index: int) -> float:
-        return self.geo.top_y - (row_index + 0.5) * self.geo.font_size
+        if content_id in manifest:
+            path = manifest[content_id].path
 
-    # --- ページ・列制御 ---
+            if path.exists():
+                return path
 
-    def new_page(self) -> None:
-        if self._page_has_content:
-            self.canvas.showPage()
-        self.column_index = 0
-        self.row_index = 0
-        self._page_has_content = False
+    # Fallback: <guide><reference type="cover" href="..."/></guide>
+    guide = opf_soup.find("guide")
 
-    def _advance_column(self) -> None:
-        self.column_index += 1
-        self.row_index = 0
-        if self._column_right_x(self.column_index) - self.geo.column_pitch < self.geo.margin:
-            self.new_page()
+    if guide:
+        ref = guide.find(
+            "reference",
+            attrs={"type": "cover"},
+        )
 
-    def start_new_paragraph_column(self) -> None:
-        """新しい段落の開始位置(必ず列の先頭)へ進める。"""
-        if self.row_index != 0:
-            self._advance_column()
+        if ref and ref.get("href"):
+            path = _resolve_href(opf_dir, ref["href"])
 
-    # --- 描画本体 ---
+            if path.suffix.lower() in (
+                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+            ) and path.exists():
+                return path
 
-    def draw_heading(self, text: str, font_size: float | None = None) -> None:
-        """章・話タイトルを1列の大きな文字で描画し、その後1列分の空白を空ける。"""
-        size = font_size or self.geo.font_size * 1.3
-        saved_font_size = self.geo.font_size
-        self.geo.font_size = size
-        self.start_new_paragraph_column()
-        x = self._column_right_x(self.column_index) - size / 2
-        self.canvas.setFont(FONT_GOTHIC, size)
-        for ch in text:
-            if self.row_index >= self.geo.rows_per_column:
-                self._advance_column()
-                x = self._column_right_x(self.column_index) - size / 2
-            y = self.geo.top_y - (self.row_index + 0.8) * size
-            self.canvas.drawCentredString(x, y, ch)
-            self._page_has_content = True
-            self.row_index += 1
-        self.geo.font_size = saved_font_size
-        self._advance_column()  # 見出しの後は必ず新しい列から本文を始める
-        self.row_index = 0
-        self._advance_column()  # 見出しと本文の間に1列分の空白を空ける
+    return None
 
-    def draw_paragraph(self, segments: list[Segment], image_resolver) -> None:
-        self.start_new_paragraph_column()
-        self.canvas.setFont(FONT_MINCHO, self.geo.font_size)
-        for segment in segments:
-            if isinstance(segment, ImageSegment):
-                self._draw_image_page(segment.url, image_resolver)
-                self.start_new_paragraph_column()
-                self.canvas.setFont(FONT_MINCHO, self.geo.font_size)
+
+# ----------------------------------------------------------------------
+# EPUB: table of contents (EPUB3 nav / EPUB2 NCX)
+# ----------------------------------------------------------------------
+
+def find_toc_entries(
+    opf_soup: BeautifulSoup,
+    manifest: dict[str, ManifestItem],
+    spine_tag,
+) -> list[dict]:
+    """
+    [{"title": str, "href": str, "level": int}, ...] を文書順に返す。
+    hrefはOPFディレクトリからの相対パス(例: "chap01.xhtml#sec2")。
+    """
+
+    # EPUB3: manifest item with properties="nav"
+    for item in manifest.values():
+        if "nav" in item.properties.split() and item.path.exists():
+            return _parse_nav_xhtml(item.path)
+
+    # EPUB2: <spine toc="ncx-id"> -> manifest item -> toc.ncx
+    ncx_id = spine_tag.get("toc")
+
+    if ncx_id and ncx_id in manifest:
+        ncx_path = manifest[ncx_id].path
+
+        if ncx_path.exists():
+            return _parse_toc_ncx(ncx_path)
+
+    return []
+
+
+def _parse_nav_xhtml(nav_path: Path) -> list[dict]:
+    soup = BeautifulSoup(
+        nav_path.read_text(encoding="utf-8", errors="replace"),
+        "lxml",
+    )
+
+    nav = None
+
+    for candidate in soup.find_all("nav"):
+        nav_type = candidate.get("epub:type") or candidate.get("type") or ""
+
+        if "toc" in nav_type.split():
+            nav = candidate
+            break
+
+    if nav is None:
+        nav = soup.find("nav")
+
+    if nav is None:
+        return []
+
+    entries = []
+
+    def walk(ol_tag, level: int):
+        for li in ol_tag.find_all("li", recursive=False):
+            a = li.find("a", recursive=False)
+
+            if a and a.get("href"):
+                entries.append({
+                    "title": a.get_text(strip=True),
+                    "href": a["href"],
+                    "level": level,
+                })
+
+            nested_ol = li.find("ol", recursive=False)
+
+            if nested_ol:
+                walk(nested_ol, level + 1)
+
+    top_ol = nav.find("ol")
+
+    if top_ol:
+        walk(top_ol, 0)
+
+    return entries
+
+
+def _parse_toc_ncx(ncx_path: Path) -> list[dict]:
+    soup = BeautifulSoup(
+        ncx_path.read_text(encoding="utf-8", errors="replace"),
+        "xml",
+    )
+
+    entries = []
+
+    def walk(parent_tag, level: int):
+        for nav_point in parent_tag.find_all(
+            "navPoint",
+            recursive=False,
+        ):
+            label = nav_point.find("navLabel")
+            content = nav_point.find("content")
+
+            if label and content and content.get("src"):
+                entries.append({
+                    "title": label.get_text(strip=True),
+                    "href": content["src"],
+                    "level": level,
+                })
+
+            walk(nav_point, level + 1)
+
+    nav_map = soup.find("navMap")
+
+    if nav_map:
+        walk(nav_map, 0)
+
+    return entries
+
+
+# ----------------------------------------------------------------------
+# CSS: collection and detection (analyze, don't clobber)
+# ----------------------------------------------------------------------
+
+def rewrite_css_urls(css: str, css_path: Path) -> str:
+    """
+    CSS内の相対 url(...) 参照を file:// URLへ変換する。
+    """
+
+    def replace(match):
+        quote = match.group(1) or ""
+        value = match.group(2).strip()
+
+        if value.startswith(("data:", "http:", "https:", "file:", "#")):
+            return match.group(0)
+
+        value = value.strip("\"'")
+
+        parsed = urlparse(value)
+
+        if parsed.scheme:
+            return match.group(0)
+
+        target = (css_path.parent / unquote(parsed.path)).resolve()
+
+        if target.exists():
+            encoded = target.as_uri()
+
+            if parsed.fragment:
+                encoded += "#" + parsed.fragment
+
+            return f"url({quote}{encoded}{quote})"
+
+        return match.group(0)
+
+    pattern = r"url\(\s*([\"']?)(.*?)\1\s*\)"
+
+    return re.sub(pattern, replace, css)
+
+
+def collect_css(spine: list[Path]) -> str:
+    """
+    spineのXHTMLが参照するCSSファイルを読み込む。
+
+    ChromiumがEPUB相対のスタイルシートURLを解決しなくて済むよう、
+    生成するHTMLにCSSを埋め込む。
+    """
+
+    css_files = []
+
+    for xhtml in spine:
+        soup = BeautifulSoup(
+            xhtml.read_text(encoding="utf-8", errors="replace"),
+            "lxml",
+        )
+
+        for link in soup.find_all("link"):
+            rel = [x.lower() for x in link.get("rel", [])]
+
+            if "stylesheet" not in rel:
                 continue
-            if isinstance(segment, RubySegment):
-                self._draw_ruby_segment(segment)
-            elif isinstance(segment, BoutenSegment):
-                self._draw_plain_atoms(segment.atoms, bouten=True)
-            else:
-                self._draw_plain_atoms(segment.atoms, bouten=False)
 
-    def _ensure_row_space(self, needed: int) -> None:
-        """現在の列にneeded文字分の空きが無ければ次の列へ進む(禁則処理用)。"""
-        if self.row_index + needed > self.geo.rows_per_column and self.row_index > 0:
-            self._advance_column()
+            href = link.get("href")
 
-    def _next_atom_starts_column(self, atoms: list[_Atom], idx: int) -> bool:
-        return self.row_index == 0 and idx < len(atoms)
-
-    def _draw_plain_atoms(self, atoms: list[_Atom], bouten: bool) -> None:
-        i = 0
-        while i < len(atoms):
-            atom = atoms[i]
-            # 行末禁則: 開き括弧等が列の最後の1文字になる場合は先に列を送る
-            if (
-                self.row_index == self.geo.rows_per_column - 1
-                and atom.text
-                and atom.text[0] in _CANNOT_END_COLUMN
-            ):
-                self._advance_column()
-
-            if self.row_index >= self.geo.rows_per_column:
-                self._advance_column()
-
-            # 行頭禁則: 列の先頭に来てはいけない文字は前の列に押し出す
-            if (
-                self.row_index == 0
-                and self.column_index > 0
-                and atom.text
-                and atom.text[0] in _CANNOT_START_COLUMN
-            ):
-                self._draw_atom_overflow(atom, bouten)
-                i += 1
+            if not href:
                 continue
 
-            self._draw_atom(atom, self.column_index, self.row_index, bouten)
-            self.row_index += 1
-            i += 1
+            parsed = urlparse(href)
 
-    def _draw_atom_overflow(self, atom: _Atom, bouten: bool) -> None:
-        """前の列の末尾に1文字だけはみ出して描画する(行頭禁則の押し出し)。"""
-        prev_column = self.column_index - 1
-        x_right = self._column_right_x(prev_column)
-        y = self._row_center_y(self.geo.rows_per_column)
-        self._draw_atom_at(atom, x_right, y, bouten)
+            if parsed.scheme:
+                continue
 
-    def _draw_atom(self, atom: _Atom, column_index: int, row_index: int, bouten: bool) -> None:
-        x_right = self._column_right_x(column_index)
-        y = self._row_center_y(row_index)
-        self._draw_atom_at(atom, x_right, y, bouten)
-        self._page_has_content = True
+            css_path = (xhtml.parent / unquote(parsed.path)).resolve()
 
-    def _draw_atom_at(self, atom: _Atom, x_right: float, y: float, bouten: bool) -> None:
-        font_size = self.geo.font_size
-        x_center = x_right - font_size / 2
-        if atom.kind == "tcy":
-            size = font_size * (0.62 if len(atom.text) > 1 else 0.9)
-            self.canvas.setFont(FONT_MINCHO, size)
-            self.canvas.drawCentredString(x_center, y - size * 0.35, atom.text)
-            self.canvas.setFont(FONT_MINCHO, font_size)
-        else:
-            # 半角英字・長音記号(ー)は本来90度回転させるのが正式な縦書き
-            # 組版だが、canvas.rotate()を使うと(reportlab 5.0.1で)直前に
-            # 別の回転描画があった場合に限って以降の回転が反映されなく
-            # なる再現性のある事象を実機で確認した(saveState/restoreStateは
-            # 正しく対になっており、生成されるPDFの内容ストリーム自体は
-            # 他の正常に回転する箇所と構造的に同一であるにもかかわらず
-            # Poppler・PyMuPDF両方で同じ結果になるため、こちら側の実装
-            # ミスではなくreportlab側の非常に狭い条件でのみ再現する問題と
-            # 判断した)。原因の切り分けに見合う実害(縦書き中に稀に混在する
-            # 半角英字が回転されない、という軽微な見た目の問題のみ)ではない
-            # ため、回転はせず直立のまま描画する(多くの簡易縦書き変換
-            # ツールも英数字は直立のまま扱っており、実用上大きな問題はない)。
-            self.canvas.drawCentredString(x_center, y - font_size * 0.35, atom.text)
-        if bouten:
-            dot_x = x_right + font_size * 0.32
-            self.canvas.setFont(FONT_MINCHO, font_size * 0.5)
-            self.canvas.drawCentredString(dot_x, y - font_size * 0.18, "・")  # ・(なかぐろ)を圏点代わりに使う
-            self.canvas.setFont(FONT_MINCHO, font_size)
+            if css_path.exists() and css_path not in css_files:
+                css_files.append(css_path)
 
-    def _draw_ruby_segment(self, segment: RubySegment) -> None:
-        n = len(segment.atoms)
-        self._ensure_row_space(n)
-        if self.row_index + n > self.geo.rows_per_column:
-            # 1文字も入らない極端に長いルビ語(通常は起きない)は列またぎを許容する
-            pass
-        start_row = self.row_index
-        start_column = self.column_index
-        for atom in segment.atoms:
-            if self.row_index >= self.geo.rows_per_column:
-                self._advance_column()
-                start_column = self.column_index
-                start_row = self.row_index
-            self._draw_atom(atom, self.column_index, self.row_index, bouten=False)
-            self.row_index += 1
+    result = []
 
-        if not segment.ruby or start_column != self.column_index:
-            return  # ルビ対象が列をまたいだ場合は簡略化のため描画を省略する
-        span_top = self._row_center_y(start_row) + self.geo.font_size / 2
-        span_bottom = self._row_center_y(self.row_index - 1) - self.geo.font_size / 2
-        span_height = span_top - span_bottom
-        ruby_size = min(self.geo.ruby_font_size, span_height / max(len(segment.ruby), 1) * 0.95)
-        ruby_x = self._column_right_x(start_column) - self.geo.font_size - ruby_size * 0.55
-        self.canvas.setFont(FONT_MINCHO, ruby_size)
-        step = span_height / len(segment.ruby)
-        for i, ch in enumerate(segment.ruby):
-            y = span_top - step * (i + 0.5) - ruby_size * 0.35
-            self.canvas.drawCentredString(ruby_x, y, ch)
-        self.canvas.setFont(FONT_MINCHO, self.geo.font_size)
+    for css_path in css_files:
+        css = css_path.read_text(encoding="utf-8", errors="replace")
+        css = rewrite_css_urls(css, css_path)
+        result.append(f"\n/* {css_path.name} */\n{css}\n")
 
-    def _draw_image_page(self, url: str, image_resolver) -> None:
-        image_path = image_resolver(url)
-        self.new_page()
-        if image_path is None:
-            return
+    return "\n".join(result)
+
+
+_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.S)
+
+_ROOT_SELECTORS = {"html", "body", ":root", "html,body", "html, body"}
+
+
+def _root_declarations(css: str) -> str:
+    """
+    セレクタがhtml/body/:rootのいずれかを含むルールの宣言ブロックを
+    連結して返す。厳密なCSSカスケードの再現ではないが、「EPUB側で
+    既に宣言されているか」を判定するには十分。
+    """
+
+    declarations = []
+
+    for selectors, body in _RULE_RE.findall(css):
+        selector_list = {
+            s.strip().lower()
+            for s in selectors.split(",")
+        }
+
+        if selector_list & _ROOT_SELECTORS:
+            declarations.append(body)
+
+    return "\n".join(declarations)
+
+
+def detect_writing_mode(css: str) -> str | None:
+    m = re.search(
+        r"writing-mode\s*:\s*([a-zA-Z-]+)",
+        _root_declarations(css),
+    )
+
+    return m.group(1).strip().lower() if m else None
+
+
+def detect_line_break(css: str) -> str | None:
+    m = re.search(
+        r"line-break\s*:\s*([a-zA-Z-]+)",
+        _root_declarations(css),
+    )
+
+    return m.group(1).strip().lower() if m else None
+
+
+def detect_page_size(css: str) -> str | None:
+    """
+    収集したCSS中の `@page { size: ...; }` を探す。
+    """
+
+    m = re.search(r"@page[^{]*\{([^{}]*)\}", css)
+
+    if not m:
+        return None
+
+    size_m = re.search(r"size\s*:\s*([^;]+)", m.group(1))
+
+    return size_m.group(1).strip() if size_m else None
+
+
+def detect_page_margin(css: str) -> str | None:
+    m = re.search(r"@page[^{]*\{([^{}]*)\}", css)
+
+    if not m:
+        return None
+
+    margin_m = re.search(r"(?<!-)margin\s*:\s*([^;]+)", m.group(1))
+
+    return margin_m.group(1).strip() if margin_m else None
+
+
+def has_ruby_rule(css: str) -> bool:
+    return bool(re.search(r"(^|[,\s}])ruby\b", css)) or bool(
+        re.search(r"(^|[,\s}])rt\b", css)
+    )
+
+
+PAGE_SIZE_KEYWORDS = {
+    "a3", "a4", "a5", "a6", "b4", "b5",
+    "letter", "legal", "ledger", "tabloid",
+}
+
+
+def resolve_page_size(value: str) -> tuple[dict, bool]:
+    """
+    CSSの `@page size` の値(またはCLI/呼び出し側の指定値)をPlaywrightの
+    `page.pdf()` 用kwargsに変換する。(kwargs, landscape) を返す。
+    """
+
+    lowered = value.strip().lower()
+    landscape = "landscape" in lowered
+
+    tokens = [
+        t for t in lowered.split()
+        if t not in ("portrait", "landscape")
+    ]
+
+    if len(tokens) == 1 and tokens[0] in PAGE_SIZE_KEYWORDS:
+        return {"format": tokens[0].upper()}, landscape
+
+    if len(tokens) == 2:
+        return {"width": tokens[0], "height": tokens[1]}, landscape
+
+    # 認識できない場合はA5にフォールバックする(エラーにはしない)。
+    return {"format": "A5"}, landscape
+
+
+# ----------------------------------------------------------------------
+# XHTML -> merged body HTML
+# ----------------------------------------------------------------------
+
+CHAPTER_HEADING_TAGS = ("h1", "h2")
+
+
+def make_absolute_urls(soup: BeautifulSoup, xhtml: Path):
+    """
+    画像・フォント等の参照をfile:// URLに変換する。
+    """
+
+    for tag, attr in [
+        ("img", "src"),
+        ("image", "href"),
+        ("image", "xlink:href"),
+        ("source", "src"),
+        ("video", "src"),
+        ("audio", "src"),
+    ]:
+        for element in soup.find_all(tag):
+            value = element.get(attr)
+
+            if not value:
+                continue
+
+            if value.startswith(("data:", "http:", "https:", "file:")):
+                continue
+
+            parsed = urlparse(value)
+            target = (xhtml.parent / unquote(parsed.path)).resolve()
+
+            if target.exists():
+                new_value = target.as_uri()
+
+                if parsed.fragment:
+                    new_value += "#" + parsed.fragment
+
+                element[attr] = new_value
+
+
+def _is_chapter_heading(tag) -> bool:
+    if tag.name in CHAPTER_HEADING_TAGS:
+        return True
+
+    epub_type = tag.get("epub:type") or ""
+
+    return "chapter" in epub_type.split()
+
+
+def extract_chapter_section(
+    xhtml: Path,
+    spine_index: int,
+) -> str:
+    """
+    spine中の1文書の<body>の中身を文字列で返す。以下を行う:
+      - 画像・フォントのURLを絶対パス化する
+      - TOCアンカーのフォールバック用に安定したidを振る(#spine-N)
+      - その文書自身の先頭要素以外にある章見出しに `chapter-break`
+        クラスを付与する(spine境界には別途改ページが入るため、これは
+        1つのspine文書内に複数章が入っているケースのみを対象とする)
+    """
+
+    text = xhtml.read_text(encoding="utf-8", errors="replace")
+    soup = BeautifulSoup(text, "lxml")
+
+    body = soup.find("body")
+
+    if body is None:
+        raise RuntimeError(f"{xhtml.name}: body がありません")
+
+    make_absolute_urls(soup, xhtml)
+
+    elements = body.find_all(True)
+    first_element = elements[0] if elements else None
+
+    for heading in body.find_all(CHAPTER_HEADING_TAGS + ("*",)):
+        if not _is_chapter_heading(heading):
+            continue
+
+        if heading is first_element:
+            continue
+
+        classes = heading.get("class", [])
+
+        if "chapter-break" not in classes:
+            heading["class"] = classes + ["chapter-break"]
+
+    inner_html = "".join(str(child) for child in body.contents)
+
+    return (
+        f'<section class="epub-chapter" '
+        f'data-spine-index="{spine_index}" '
+        f'id="spine-{spine_index}">\n'
+        f"{inner_html}\n"
+        f"</section>"
+    )
+
+
+def resolve_toc_href(
+    href: str,
+    opf_dir: Path,
+    spine: list[Path],
+) -> str:
+    """
+    EPUB相対のTOC href(`#fragment` を含みうる)を、生成した単一HTML内の
+    アンカーに変換する。元ファイルにフラグメントが存在すればそのまま
+    引き継がれる(bodyのHTMLをid込みでそのままコピーしているため)。
+    存在しなければspineセクション自身のidにフォールバックする。
+    """
+
+    parsed = urlparse(href)
+    target_path = _resolve_href(opf_dir, parsed.path)
+
+    for index, spine_path in enumerate(spine):
+        if spine_path == target_path:
+            if parsed.fragment:
+                return f"#{parsed.fragment}"
+
+            return f"#spine-{index}"
+
+    # spineのどの文書にも一致しない(非XHTMLリソースを指している等)場合は
+    # 実害のないダミーアンカーのままにする。
+    return "#"
+
+
+def build_toc_html(
+    toc_entries: list[dict],
+    opf_dir: Path,
+    spine: list[Path],
+) -> str:
+    if not toc_entries:
+        return ""
+
+    items = []
+
+    for entry in toc_entries:
+        anchor = resolve_toc_href(entry["href"], opf_dir, spine)
+        indent_class = f'toc-level-{min(entry["level"], 3)}'
+
+        items.append(
+            f'<li class="{indent_class}">'
+            f'<a href="{anchor}">{entry["title"]}</a>'
+            f"</li>"
+        )
+
+    return (
+        '<section class="epub-toc">\n'
+        "<h1>目次</h1>\n"
+        "<ol>\n" + "\n".join(items) + "\n</ol>\n"
+        "</section>"
+    )
+
+
+def build_cover_html(cover: Path | None) -> str:
+    if cover is None:
+        return ""
+
+    return (
+        '<section class="epub-cover">\n'
+        f'<img src="{cover.as_uri()}" alt="cover">\n'
+        "</section>"
+    )
+
+
+# ----------------------------------------------------------------------
+# HTML document assembly
+# ----------------------------------------------------------------------
+
+def build_style_block(
+    epub_css: str,
+    font_size: str,
+    line_height: str,
+    margin: float,
+    writing_mode_override: str | None,
+    page_size_override: str | None,
+) -> tuple[str, dict, bool]:
+    """
+    <head>の中身(EPUBのCSS + 印刷用CSS)を組み立てる。表紙/TOCのみの
+    仮レンダリング(実際に何ページ占めるか測定するため)と本番レンダリング
+    の両方で共有し、ページ割りを一致させる。
+
+    (head_html, pdf_size_kwargs, landscape) を返す。
+    """
+
+    detected_writing_mode = writing_mode_override or detect_writing_mode(epub_css)
+    writing_mode = detected_writing_mode or "vertical-rl"
+
+    detected_line_break = detect_line_break(epub_css)
+    line_break_rule = (
+        "" if detected_line_break else "line-break: strict;"
+    )
+
+    ruby_already_styled = has_ruby_rule(epub_css)
+
+    detected_size = page_size_override or detect_page_size(epub_css)
+    size_kwargs, landscape = resolve_page_size(detected_size or "A5")
+
+    detected_margin = detect_page_margin(epub_css)
+    page_margin_css = detected_margin or f"{margin}mm"
+
+    ruby_css = (
+        ""
+        if ruby_already_styled
+        else """
+    ruby { ruby-position: over; }
+    rt { font-size: 0.5em; line-height: 1; white-space: nowrap; }
+    """
+    )
+
+    custom_css = f"""
+    /* ==============================================================
+       印刷用スタイルシート。
+       EPUB自身のCSSが既に宣言していない項目だけを補う。!important は
+       使わないため、同等以上の詳細度を持つEPUB側のルールが存在すれば
+       そちらが優先される。
+       ============================================================== */
+
+    @page {{
+        size: {detected_size or "A5"};
+        margin: {page_margin_css};
+    }}
+
+    html, body {{
+        margin: 0;
+        padding: 0;
+        background: white;
+    }}
+
+    body {{
+        writing-mode: {writing_mode};
+        text-orientation: mixed;
+        {line_break_rule}
+        word-break: normal;
+        overflow-wrap: normal;
+
+        font-size: {font_size};
+        line-height: {line_height};
+
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }}
+    {ruby_css}
+
+    h1, h2, h3, h4, h5, h6 {{
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }}
+
+    /* 章の区切り: spine文書の境界 */
+    .epub-chapter + .epub-chapter {{
+        break-before: page;
+        page-break-before: always;
+    }}
+
+    /* ...と、検出した文書内の章見出し */
+    .chapter-break {{
+        break-before: page;
+        page-break-before: always;
+    }}
+
+    .epub-cover {{
+        break-after: page;
+        page-break-after: always;
+
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+    }}
+
+    .epub-cover img {{
+        max-width: 100%;
+        max-height: 100%;
+    }}
+
+    .epub-toc {{
+        break-after: page;
+        page-break-after: always;
+    }}
+
+    .epub-toc ol {{
+        list-style: none;
+    }}
+
+    .epub-toc .toc-level-1 {{ padding-inline-start: 1em; }}
+    .epub-toc .toc-level-2 {{ padding-inline-start: 2em; }}
+    .epub-toc .toc-level-3 {{ padding-inline-start: 3em; }}
+
+    img {{
+        max-width: 100%;
+        max-height: 100%;
+    }}
+
+    table {{
+        max-width: 100%;
+    }}
+
+    nav.toc, .navigation {{
+        display: none;
+    }}
+    """
+
+    head_html = f"""
+<meta charset="UTF-8">
+<style>
+{epub_css}
+</style>
+<style>
+{custom_css}
+</style>
+"""
+
+    return head_html, size_kwargs, landscape
+
+
+def wrap_document(head_html: str, body_sections: list[str]) -> str:
+    return f"""
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+{head_html}
+</head>
+<body>
+{''.join(body_sections)}
+</body>
+</html>
+"""
+
+
+# ----------------------------------------------------------------------
+# PDF page numbers
+# ----------------------------------------------------------------------
+
+def find_japanese_font() -> Path | None:
+    candidates = [
+        Path("/System/Library/Fonts/ヒラギノ明朝 ProN.ttc"),
+        Path("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"),
+        Path("/System/Library/Fonts/Hiragino Mincho ProN.ttc"),
+        Path("/System/Library/Fonts/Hiragino Sans GB.ttc"),
+        Path("/Library/Fonts/NotoSansJP-Regular.ttf"),
+        Path.home() / "Library/Fonts/NotoSansJP-Regular.ttf",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return None
+
+
+def add_page_numbers(
+    input_pdf: Path,
+    output_pdf: Path,
+    position: str,
+    skip_pages: int,
+):
+    """
+    ReportLab+pypdfでページ番号を重ね書きする。
+
+    skip_pages: 番号を振らない先頭ページ数(表紙・目次)。
+    """
+
+    reader = PdfReader(str(input_pdf))
+    writer = PdfWriter()
+
+    font_path = find_japanese_font()
+    font_name = "Helvetica"
+
+    if font_path:
         try:
-            from reportlab.lib.utils import ImageReader
+            pdfmetrics.registerFont(TTFont("JapaneseFont", str(font_path)))
+            font_name = "JapaneseFont"
+        except Exception:
+            pass
 
-            img = ImageReader(str(image_path))
-            iw, ih = img.getSize()
-        except Exception:  # noqa: BLE001 - 画像が壊れていてもPDF生成自体は継続する
-            return
-        max_w = self.geo.page_width - self.geo.margin * 2
-        max_h = self.geo.page_height - self.geo.margin * 2
-        scale = min(max_w / iw, max_h / ih, 1.0)
-        w, h = iw * scale, ih * scale
-        x = (self.geo.page_width - w) / 2
-        y = (self.geo.page_height - h) / 2
-        self.canvas.drawImage(img, x, y, width=w, height=h, preserveAspectRatio=True)
-        self._page_has_content = True
-        self.new_page()
+    for page_index, page in enumerate(reader.pages):
+        if page_index < skip_pages:
+            writer.add_page(page)
+            continue
 
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
 
-class _ImageResolver:
-    """挿絵URLを実ファイルパスへ解決し、一時ディレクトリにキャッシュするヘルパー。"""
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp:
+            overlay_path = Path(temp.name)
 
-    def __init__(self, work_dir: Path, session: requests.Session | None, disk_cache: "Cache | None"):
-        self.work_dir = work_dir
-        self.session = session or requests.Session()
-        if session is None:
-            self.session.headers["User-Agent"] = USER_AGENT
-        self.disk_cache = disk_cache
-        self._resolved: dict[str, Path | None] = {}
-        self._count = 0
+        c = canvas.Canvas(str(overlay_path), pagesize=(width, height))
+        c.setFont(font_name, 9)
 
-    def __call__(self, url: str) -> Path | None:
-        if url in self._resolved:
-            return self._resolved[url]
-        path = self._obtain(url)
-        self._resolved[url] = path
-        return path
+        page_number = str(page_index + 1 - skip_pages)
+        text_width = pdfmetrics.stringWidth(page_number, font_name, 9)
 
-    def _obtain(self, url: str) -> Path | None:
-        content: bytes
-        cached = self.disk_cache.load_image(url) if self.disk_cache else None
-        if cached is not None:
-            content, _content_type = cached
+        if position == "bottom":
+            x = (width - text_width) / 2
+            y = 12 * 2.83465
+
+        elif position == "outer":
+            margin = 12 * 2.83465
+
+            if (page_index + 1 - skip_pages) % 2:
+                x = width - margin - text_width
+            else:
+                x = margin
+
+            y = 12 * 2.83465
+
         else:
-            try:
-                resp = self.session.get(url, timeout=15)
-                resp.raise_for_status()
-                content = resp.content
-                if self.disk_cache:
-                    content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-                    self.disk_cache.save_image(url, content, content_type)
-            except (requests.RequestException, OSError) as exc:
-                print(f"  [警告] 挿絵のダウンロードに失敗しました ({url}): {exc}", file=sys.stderr)
-                return None
+            raise ValueError(f"Unknown page-number position: {position}")
 
-        self._count += 1
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        path = self.work_dir / f"pdf_illust_{self._count:04d}.img"
-        path.write_bytes(content)
-        return path
+        c.drawString(x, y, page_number)
+        c.save()
+
+        overlay_reader = PdfReader(str(overlay_path))
+        # writerに紐付けた後のページに対してmerge_pageする(先にmergeして
+        # からwriterへ渡す順序はpypdf 7.0で削除予定のため)。
+        added_page = writer.add_page(page)
+        added_page.merge_page(overlay_reader.pages[0])
+
+        overlay_path.unlink(missing_ok=True)
+
+    with output_pdf.open("wb") as f:
+        writer.write(f)
+
+
+# ----------------------------------------------------------------------
+# Main conversion
+# ----------------------------------------------------------------------
+
+def _file_url(path: Path) -> str:
+    return path.resolve().as_uri()
+
+
+async def _convert_epub(
+    epub_path: Path,
+    output_pdf: Path,
+    *,
+    font_size: str,
+    line_height: str,
+    margin: float,
+    page_number_position: str,
+    writing_mode_override: str | None,
+    page_size_override: str | None,
+    include_cover: bool,
+    include_toc: bool,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="narou-dl-pdf-") as temp_dir:
+        temp_dir = Path(temp_dir)
+
+        with zipfile.ZipFile(epub_path, "r") as z:
+            z.extractall(temp_dir)
+
+        epub = parse_epub(temp_dir)
+        epub_css = collect_css(epub.spine)
+
+        head_html, size_kwargs, landscape = build_style_block(
+            epub_css=epub_css,
+            font_size=font_size,
+            line_height=line_height,
+            margin=margin,
+            writing_mode_override=writing_mode_override,
+            page_size_override=page_size_override,
+        )
+
+        opf_dir = epub.opf.parent
+
+        cover_html = build_cover_html(epub.cover) if include_cover else ""
+        toc_html = (
+            build_toc_html(epub.toc_entries, opf_dir, epub.spine)
+            if include_toc
+            else ""
+        )
+        front_matter_sections = [s for s in (cover_html, toc_html) if s]
+
+        chapters = [
+            extract_chapter_section(xhtml, index)
+            for index, xhtml in enumerate(epub.spine)
+        ]
+
+        pdf_kwargs = dict(
+            landscape=landscape,
+            print_background=True,
+            prefer_css_page_size=True,
+            margin={
+                "top": f"{margin}mm",
+                "right": f"{margin}mm",
+                "bottom": f"{margin}mm",
+                "left": f"{margin}mm",
+            },
+            **size_kwargs,
+        )
+
+        async def render(body_sections: list[str], out_path: Path):
+            html = wrap_document(head_html, body_sections)
+            html_path = out_path.with_suffix(".html")
+            html_path.write_text(html, encoding="utf-8")
+
+            page = await context.new_page()
+            await page.goto(_file_url(html_path), wait_until="networkidle")
+            await page.evaluate(
+                """
+                async () => {
+                    if (document.fonts) {
+                        await document.fonts.ready;
+                    }
+                }
+                """
+            )
+            await page.pdf(path=str(out_path), **pdf_kwargs)
+            await page.close()
+
+        raw_pdf = temp_dir / "chromium.pdf"
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(locale="ja-JP")
+
+            # 表紙・TOCは先に単独でレンダリングし、実際に何ページ占めるかを
+            # 測ってからページ番号のスキップ数として使う(TOCが複数ページに
+            # 渡る作品もあるため、1セクション=1ページと決め打ちできない)。
+            if front_matter_sections:
+                front_matter_pdf = temp_dir / "front_matter.pdf"
+                await render(front_matter_sections, front_matter_pdf)
+                skip_pages = len(PdfReader(str(front_matter_pdf)).pages)
+            else:
+                skip_pages = 0
+
+            await render(front_matter_sections + chapters, raw_pdf)
+
+            await browser.close()
+
+        add_page_numbers(raw_pdf, output_pdf, page_number_position, skip_pages)
 
 
 def build_pdf(
-    info: NovelInfo,
-    episodes: list[Episode],
-    output_path: str,
-    vertical: bool = True,
-    chapter_map: dict[int, str] | None = None,
-    embed_images: bool = True,
-    session: requests.Session | None = None,
-    disk_cache: "Cache | None" = None,
+    epub_path: str | Path,
+    pdf_path: str | Path,
+    *,
+    font_size: str = "9pt",
+    line_height: str = "1.8",
+    margin: float = 15,
+    page_number_position: str = "bottom",
+    writing_mode: str | None = None,
+    page_size: str | None = None,
+    include_cover: bool = True,
+    include_toc: bool = True,
 ) -> None:
-    """1冊分のPDFを書き出す(ReportLabのみ、外部ツール不要)。
+    """生成済みのEPUBファイルをChromiumで描画し、PDFに変換する。
+
+    書字方向・判型・余白は指定しない限りEPUB自身のCSSから自動検出する
+    (詳細はモジュールdocstring参照)。
 
     Args:
-        info: 作品メタデータ。
-        episodes: 話データのリスト(index順にソート済みであること)。
-        output_path: 出力先の.pdfファイルパス。
-        vertical: True(既定)なら縦書き、False なら横書き(簡易)で生成する。
-        chapter_map: 話数(1始まり) -> 章タイトル の対応表。
-        embed_images: True(既定)なら挿絵を専用ページとして挿入する。
-        session: 挿絵ダウンロードに使う requests.Session。
-        disk_cache: cache.Cache インスタンス(挿絵の再ダウンロード回避用)。
+        epub_path: 変換元のEPUBファイル。
+        pdf_path: 出力するPDFファイル。
+        font_size: EPUBのCSSが指定していない場合のフォールバック値。
+        line_height: 同上。
+        margin: EPUBのCSSが `@page` でmarginを指定していない場合の
+            フォールバック値(mm)。
+        page_number_position: `"bottom"` (中央下)または `"outer"`
+            (奇数ページ/偶数ページで左右を入れ替える、右開き想定)。
+        writing_mode: `None` ならEPUBのCSSから自動検出する。
+            `"vertical-rl"` / `"horizontal-tb"` を指定すると強制する。
+        page_size: `None` ならEPUBのCSSの `@page size` から自動検出し、
+            見つからなければA5にフォールバックする。
+        include_cover: EPUBに表紙画像があれば1ページ目に描画する。
+        include_toc: EPUB3のnavまたはEPUB2のNCXから目次ページを生成する。
+
+    Raises:
+        PdfEngineError: Chromiumが未インストール、またはEPUBの構造が
+            壊れている等でレンダリングに失敗した場合。
     """
-    _ensure_fonts_registered()
-    chapter_map = chapter_map or {}
 
-    geometry = _default_geometry(vertical)
-    canvas = Canvas(output_path, pagesize=(geometry.page_width, geometry.page_height))
-    canvas.setTitle(info.title)
-    canvas.setAuthor(info.writer)
-
-    work_dir = Path(output_path).resolve().parent / f".{Path(output_path).stem}_pdf_images"
-    resolver = _ImageResolver(work_dir, session, disk_cache) if embed_images else (lambda _url: None)
-
-    writer = _VerticalWriter(canvas, geometry)
-
-    canvas.setFont(FONT_GOTHIC, geometry.font_size * 1.6)
-    canvas.drawCentredString(geometry.page_width / 2, geometry.page_height / 2 + 20 * mm, info.title)
-    canvas.setFont(FONT_MINCHO, geometry.font_size * 1.1)
-    canvas.drawCentredString(geometry.page_width / 2, geometry.page_height / 2 - 5 * mm, info.writer)
-    writer._page_has_content = True
-    writer.new_page()
-
-    if info.story.strip():
-        writer.draw_heading("あらすじ")
-        for line in info.story.splitlines():
-            writer.draw_paragraph(_parse_paragraph(line), resolver)
-        writer.new_page()
-
-    last_chapter_title: str | None = None
-    for ep in episodes:
-        chapter_title = chapter_map.get(ep.index)
-        if chapter_title and chapter_title != last_chapter_title:
-            writer.new_page()
-            writer.draw_heading(chapter_title, font_size=geometry.font_size * 1.6)
-            last_chapter_title = chapter_title
-
-        if ep.subtitle:
-            writer.draw_heading(ep.subtitle)
-        for paragraph in ep.paragraphs:
-            segments = _parse_paragraph(paragraph)
-            writer.draw_paragraph(segments, resolver)
-
-    canvas.showPage()
-    canvas.save()
-
-    if isinstance(resolver, _ImageResolver) and resolver.work_dir.exists():
-        import shutil
-
-        shutil.rmtree(resolver.work_dir, ignore_errors=True)
+    try:
+        asyncio.run(
+            _convert_epub(
+                Path(epub_path),
+                Path(pdf_path),
+                font_size=font_size,
+                line_height=line_height,
+                margin=margin,
+                page_number_position=page_number_position,
+                writing_mode_override=writing_mode,
+                page_size_override=page_size,
+                include_cover=include_cover,
+                include_toc=include_toc,
+            )
+        )
+    except PdfEngineError:
+        raise
+    except Exception as exc:
+        raise PdfEngineError(str(exc)) from exc

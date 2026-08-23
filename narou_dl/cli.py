@@ -335,10 +335,11 @@ def run(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=saved["emit_pdf"],
         help=(
-            "EPUB(または青空文庫記法テキスト)と同じ話データから、独自の"
-            "縦書き組版エンジン(narou_dl/pdf_builder.py、外部ツール不要の"
-            "Pure Python実装)でPDFも書き出す。"
-            '要 pip install -e ".[pdf]" (プロジェクトルートで実行)'
+            "生成したEPUBをChromium(Playwright)で描画してPDFも書き出す"
+            "(narou_dl/pdf_builder.py)。縦書き/横書き・判型はEPUB自身の"
+            "CSSから自動判定される。"
+            '要 pip install -e ".[pdf]" と python -m playwright install '
+            "chromium (いずれもプロジェクトルートで実行)"
         ),
     )
     parser.add_argument(
@@ -670,27 +671,27 @@ def _download_and_build(args: argparse.Namespace) -> int:
 
     if args.emit_pdf:
         try:
-            from .pdf_builder import build_pdf
+            from .pdf_builder import PdfEngineError, build_pdf
         except ImportError:
             print(
-                "[エラー] --emit-pdf にはreportlabが必要です。"
+                "[エラー] --emit-pdf にはplaywrightが必要です。"
                 'プロジェクトルートで pip install -e ".[pdf]" を'
                 "実行してインストールしてください",
                 file=sys.stderr,
             )
             return 1
         pdf_path = Path(output_path).with_suffix(".pdf")
-        print(f"  縦書きPDFを生成中... -> {pdf_path}")
-        build_pdf(
-            info,
-            episodes,
-            str(pdf_path),
-            vertical=not args.yoko,
-            chapter_map=chapter_map,
-            embed_images=not args.no_images,
-            session=session,
-            disk_cache=cache,
-        )
+        print(f"  PDFを生成中(Chromium)... -> {pdf_path}")
+        try:
+            build_pdf(output_path, pdf_path)
+        except PdfEngineError as exc:
+            print(
+                f"[エラー] PDF生成に失敗しました: {exc}\n"
+                "Chromium本体が未インストールの場合は "
+                "python -m playwright install chromium を実行してください",
+                file=sys.stderr,
+            )
+            return 1
 
     if args.library_add:
         cache_dir = Path(args.cache_dir) if args.cache_dir else None

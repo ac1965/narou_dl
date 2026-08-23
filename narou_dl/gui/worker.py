@@ -211,7 +211,7 @@ class DownloadWorker(QThread):
                 self._emit_aozora_txt(args, info, episodes, chapter_map, session, cache, output_path)
 
         if args.emit_pdf:
-            self._emit_pdf(args, info, episodes, chapter_map, session, cache, output_path)
+            self._emit_pdf(output_path)
 
         self.log.emit("完了しました。")
 
@@ -272,26 +272,24 @@ class DownloadWorker(QThread):
         txt_path.write_text(novel_text, encoding="utf-8")
         self.log.emit(f"  青空文庫記法テキストを書き出しました -> {txt_path}")
 
-    def _emit_pdf(self, args, info, episodes, chapter_map, session, cache, output_path) -> None:
+    def _emit_pdf(self, output_path) -> None:
         try:
-            from ..pdf_builder import build_pdf
+            from ..pdf_builder import PdfEngineError, build_pdf
         except ImportError as exc:
             raise _WorkerAbort(
-                "--emit-pdfにはreportlabが必要です。プロジェクトルートで"
+                "--emit-pdfにはplaywrightが必要です。プロジェクトルートで"
                 'pip install -e ".[pdf]" を実行してインストールしてください'
             ) from exc
         pdf_path = Path(output_path).with_suffix(".pdf")
-        self.log.emit(f"  縦書きPDFを生成中... -> {pdf_path}")
-        build_pdf(
-            info,
-            episodes,
-            str(pdf_path),
-            vertical=not args.yoko,
-            chapter_map=chapter_map,
-            embed_images=not args.no_images,
-            session=session,
-            disk_cache=cache,
-        )
+        self.log.emit(f"  PDFを生成中(Chromium)... -> {pdf_path}")
+        try:
+            build_pdf(output_path, pdf_path)
+        except PdfEngineError as exc:
+            raise _WorkerAbort(
+                f"PDF生成に失敗しました: {exc}\n"
+                "Chromium本体が未インストールの場合は "
+                "python -m playwright install chromium を実行してください"
+            ) from exc
 
     def _add_to_library(self, args, info) -> None:
         cache_dir = Path(args.cache_dir) if args.cache_dir else None

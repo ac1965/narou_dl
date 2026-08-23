@@ -40,11 +40,13 @@ $(VENV_GUI)/bin/python:
 setup-cli: $(VENV_CLI)/bin/python
 	$(VENV_CLI)/bin/pip install --upgrade pip
 	$(VENV_CLI)/bin/pip install -e ".[pdf]"
+	$(VENV_CLI)/bin/python -m playwright install chromium
 	@echo "-> $(VENV_CLI)/bin/narou-dl"
 
 setup-gui: $(VENV_GUI)/bin/python
 	$(VENV_GUI)/bin/pip install --upgrade pip
 	$(VENV_GUI)/bin/pip install -e ".[gui,pdf]"
+	$(VENV_GUI)/bin/python -m playwright install chromium
 	@echo "-> $(VENV_GUI)/bin/narou-dl-gui"
 
 run: setup-cli
@@ -68,6 +70,13 @@ app:
 	$(VENV_APP)/bin/pip install --upgrade pip
 	$(VENV_APP)/bin/pip install ".[pdf]"
 	$(VENV_APP)/bin/pip install "PySide6>=6.5" py2app
+	# Chromium本体は.appバンドルには同梱されない(py2appはPythonパッケージしか
+	# 検出できず、Playwrightのブラウザは~/Library/Caches/ms-playwright/という
+	# マシン単位の共有キャッシュに入るため)。ここでのインストールは、この
+	# ビルドマシン上でmake install-appしたアプリのPDF出力がすぐ動くようにする
+	# ためのもので、別のMacに.appだけコピーした場合は改めて
+	# `python -m playwright install chromium` が必要になる。
+	$(VENV_APP)/bin/python -m playwright install chromium
 	rm -rf build dist
 	mv pyproject.toml pyproject.toml.bak; \
 	$(VENV_APP)/bin/python setup.py py2app; status=$$?; \
@@ -103,6 +112,7 @@ uninstall-app:
 install:
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -e ".[pdf]"
+	$(PYTHON) -m playwright install chromium
 	@echo "-> narou-dl ($$($(PYTHON) -c 'import sys; print(sys.prefix)'))"
 
 uninstall:

@@ -115,7 +115,7 @@ class DownloadTab(QWidget):
             "この作品をライブラリに登録する(CLIの--update-allで追跡・一括更新できるようになる)"
         )
         self.emit_pdf_check = QCheckBox(
-            "縦書きPDFも生成する(Pure Python製の独自組版、バックエンド問わず利用可)"
+            "PDFも生成する(Chromiumで描画、バックエンド問わず利用可)"
         )
         for chk in (
             self.yoko_check,

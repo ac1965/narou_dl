@@ -127,15 +127,20 @@ narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images  # 挿絵注記も�
 
 ### PDF出力
 
-同じ話データから縦書き(既定)/横書きのPDFも書き出せる。`--backend`の
-どちらとも併用できる。外部ツール(Calibre等)は使わず、
-`narou_dl/pdf_builder.py`が文字単位でマス目に配置するPure Python製の
-独自縦書き組版エンジンで、ReportLab組み込みの日本語CIDフォントのみで
-完結する(フォントファイルの同梱不要)。
+生成したEPUBをChromium(Playwright経由)で描画してPDFも書き出せる。
+`--backend`のどちらとも併用できる(`--emit-aozora-txt`と同様、EPUB生成後に
+そのEPUBファイルを追加で変換する)。縦書き/横書き・判型・余白はEPUB自身の
+CSS(`narou_dl/epub_builder.py`が書き出す`writing-mode`等)から自動判定され、
+ルビ・禁則処理もChromiumのネイティブ実装にそのまま任せるため、独自の組版
+エンジンを実装していた旧版(ReportLab)で残っていた「半角英字・長音記号が
+縦書きで回転しない」といった制約はない。表紙画像があれば1ページ目に、
+EPUBの目次があれば専用ページとしても生成する。
 
 `make setup-cli`/`make setup-gui`/`make install`/`make app`はいずれも
-`reportlab`(pdf extra)を含めてインストールするため、追加作業なしで
-`--emit-pdf`が使える。
+`playwright`(pdf extra)を含めてインストールし、続けて
+`python -m playwright install chromium`(Chromium本体。pipの
+インストール対象には含まれないため別途必要、初回のみ約270MB)まで実行する
+ため、追加作業なしで`--emit-pdf`が使える。
 
 ```bash
 narou-dl N9669BK --emit-pdf
@@ -148,12 +153,16 @@ Makefileを使わず`pip install -e .`(pdf extra無し)で入れた場合は、
 
 ```bash
 pip install -e ".[pdf]"
+python -m playwright install chromium
 ```
 
-ルビ・傍点・縦中横(数字の連続)・章区切り・挿絵(専用ページ)・簡易禁則処理に
-対応する。既知の制約として、括弧等の約物は縦書き用の回転グリフにはならず、
-半角英字・長音記号(ー)も直立のまま描画される(詳細は`pdf_builder.py`の
-モジュールdocstringを参照)。
+narou-dlのダウンロードを介さず、手元の任意のEPUBファイルをPDFに変換
+したいだけの場合は`scripts/epub2pdf.py`(`narou_dl.pdf_builder`への薄い
+CLIラッパー)も使える。
+
+```bash
+python scripts/epub2pdf.py book.epub -o book.pdf
+```
 
 ### ライブラリ機能
 
@@ -189,7 +198,7 @@ make run-gui
 | 一括ダウンロード | ncode欄に1行1件で複数指定すると、順番に自動でダウンロードする(出力ファイル名は各作品とも自動生成)。進捗表示には現在取得中のncodeと、判明次第そのタイトルが添えて表示される |
 | キャンセル | ダウンロード中は「キャンセル」ボタンで中断できる(現在取得中の話の完了を待ってから止まる協調的キャンセル)。一括ダウンロード中にキャンセルすると残りのキューも実行されない |
 | バックエンド選択 | `ebooklib`(既定)/`aozoraepub3`をGUIから選択できる。`aozoraepub3`選択時は`.jar`パス・デバイス最適化オプションを指定できる。`ebooklib`選択時は`--emit-aozora-txt`相当のオプションも利用できる |
-| PDF出力 | 「縦書きPDFも生成する」にチェックすると`--emit-pdf`相当の縦書きPDF(Pure Python製の独自組版)も生成する。バックエンドの選択に関わらず利用できる |
+| PDF出力 | 「PDFも生成する」にチェックすると`--emit-pdf`相当のPDF(Chromiumで描画)も生成する。バックエンドの選択に関わらず利用できる |
 | 設定の保存 | 主要オプション(縦横・バックエンド設定等)は`~/.config/narou-dl/config.json`に保存され、次回起動時に復元される。CLIの`--save-config`と同じファイルを共有するため、どちらで変更してももう一方に反映される(詳細は「CLIの使い方」内の既定オプション保存の節を参照) |
 | ライブラリに登録 | ダウンロードタブの「この作品をライブラリに登録する」にチェックすると、CLIの`--library-add`と同様に今回のオプションと共に登録される |
 | Finderで表示 | ダウンロード完了ダイアログの「Finderで表示」ボタンから、生成したEPUB(一括ダウンロード時は出力フォルダ)をFinderで開ける |
@@ -229,6 +238,7 @@ rm -rf .venv-app-build
 python3 -m venv .venv-app-build
 .venv-app-build/bin/pip install ".[pdf]"
 .venv-app-build/bin/pip install "PySide6>=6.5" py2app
+.venv-app-build/bin/python -m playwright install chromium
 rm -rf build dist
 
 # setup.py はpy2app専用で、pyproject.tomlの[project]と併存すると
@@ -249,6 +259,14 @@ mv pyproject.toml.bak pyproject.toml
 生成物は`dist/narou-dl.app`(中間ファイルは`build/`)。`make clean`で
 `build/`/`dist/`を削除でき(`make app`は次回実行時にこれも自動で行う)、
 `make distclean`で`.venv-app-build/`ごと削除できる。
+
+Chromium本体は`.app`バンドルには同梱されない(py2appが検出できるのは
+Pythonパッケージのみで、PlaywrightのChromiumは`~/Library/Caches/ms-playwright/`
+というマシン単位の共有キャッシュに入るため)。`make app`実行時に上記の
+`playwright install chromium`でこのビルドマシン上のキャッシュへ
+インストールしておくため、そのままそのマシンで`make install-app`すれば
+PDF出力もすぐ使えるが、生成した`.app`だけを別のMacにコピーした場合は
+そちらでも改めて`python -m playwright install chromium`が必要になる。
 
 ## 仕組み
 
@@ -287,17 +305,23 @@ mv pyproject.toml.bak pyproject.toml
    - CLI(`--save-config`)・GUIのどちらから保存しても同じファイルを読み書きするため、
      設定が食い違わない
 7. **PDF出力** (`narou_dl/pdf_builder.py`)
-   - `--emit-pdf`指定時、EPUBと同じ話データ(Episode.paragraphs)から
-     ReportLab(組み込みの日本語CIDフォント)のみで縦書き/横書きPDFを生成する
-   - 外部ツールは使わず、文字単位でマス目に配置する独自の縦書き組版エンジン
-     (ルビ・傍点・縦中横・章区切り・挿絵ページ・簡易禁則処理に対応)
+   - `--emit-pdf`指定時、生成済みのEPUBファイルをChromium(Playwright)で
+     描画してPDFに変換する
+   - 縦書き/横書き・判型・余白はEPUB自身のCSS(`@page`・`writing-mode`)から
+     自動判定し、検出できなかった項目だけ既定値で補う(EPUBのCSSを
+     強制上書きしない)。ルビ・禁則処理はChromiumのネイティブ実装に任せる
+   - 表紙画像(あれば)を1ページ目に、EPUBの目次(nav/NCX)があれば専用ページ
+     として生成し、ページ番号は生成後のPDFにReportLab+pypdfで重ね書きする
 
 ## テスト
 
 `scraper.py`(なろうのHTML構造への依存が強く、サイト側の変更で壊れやすい)を
 中心に、`cache.py`・`aozora.py`・`epub_builder.py`・`library.py`・`config.py`・
 `pdf_builder.py`・`cli.py`のユニットテストがある。実際のなろうサイトへは
-通信せず、固定HTMLやtmp_pathで完結する。
+通信せず、固定HTMLやtmp_pathで完結する。`pdf_builder.py`のテストのうち
+実際にChromiumを起動する1件のみ、Chromium本体が未インストールの環境では
+(`make test`はplaywrightパッケージのみを要求し、Chromium本体の
+インストールまでは強制しないため)自動的にスキップされる。
 
 ```bash
 make test
