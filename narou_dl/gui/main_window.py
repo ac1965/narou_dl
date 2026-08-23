@@ -114,6 +114,9 @@ class DownloadTab(QWidget):
         self.library_add_check = QCheckBox(
             "この作品をライブラリに登録する(CLIの--update-allで追跡・一括更新できるようになる)"
         )
+        self.emit_pdf_check = QCheckBox(
+            "縦書きPDFも生成する(Pure Python製の独自組版、バックエンド問わず利用可)"
+        )
         for chk in (
             self.yoko_check,
             self.no_chapters_check,
@@ -122,6 +125,7 @@ class DownloadTab(QWidget):
             self.refresh_check,
             self.clear_cache_check,
             self.library_add_check,
+            self.emit_pdf_check,
         ):
             opts_layout.addWidget(chk)
         layout.addWidget(opts_group)
@@ -247,6 +251,7 @@ class DownloadTab(QWidget):
         self.device_edit.setText(config["device"] or "")
         self.emit_aozora_txt_check.setChecked(bool(config["emit_aozora_txt"]))
         self.emit_aozora_txt_images_check.setChecked(bool(config["emit_aozora_txt_images"]))
+        self.emit_pdf_check.setChecked(bool(config["emit_pdf"]))
         self._update_backend_enabled()
 
     def _save_settings(self) -> None:
@@ -260,6 +265,7 @@ class DownloadTab(QWidget):
             "device": self.device_edit.text().strip() or None,
             "emit_aozora_txt": self.emit_aozora_txt_check.isChecked(),
             "emit_aozora_txt_images": self.emit_aozora_txt_images_check.isChecked(),
+            "emit_pdf": self.emit_pdf_check.isChecked(),
         })
 
     # --- ダウンロード開始・キューの進行 ---
@@ -314,6 +320,7 @@ class DownloadTab(QWidget):
             emit_aozora_txt=self.emit_aozora_txt_check.isChecked(),
             emit_aozora_txt_images=self.emit_aozora_txt_images_check.isChecked(),
             library_add=self.library_add_check.isChecked(),
+            emit_pdf=self.emit_pdf_check.isChecked(),
         )
 
     def _start_next_in_queue(self) -> None:

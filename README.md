@@ -32,15 +32,20 @@ make setup-cli
 | `make install` | `narou-dl`をpyenv等のグローバルなPython環境に直接インストールする(venv不要でどこからでも使える) |
 | `make uninstall` | グローバル環境から`narou-dl`をアンインストールする |
 | `make test` | pytestでテストスイートを実行する |
-| `make clean` | リポジトリ内の一時ファイル(`__pycache__`・各種キャッシュディレクトリ)を削除する |
-| `make distclean` | `clean`・`uninstall`に加え仮想環境・ビルド成果物も含めて全て削除する |
+| `make clean` | リポジトリ内の一時ファイル・ビルド成果物(`build/`/`dist/`/`narou_dl.egg-info/`含む)を削除する。ゼロから`make app`し直したい場合はこれで十分 |
+| `make distclean` | `clean`・`uninstall`に加え仮想環境(`.venv/` `.venv-gui/` `.venv-app-build/`)も全て削除する |
 
 `setup-cli`/`setup-gui`/`app`の仮想環境(`.venv/` `.venv-gui/` `.venv-app-build/`)を
 分けているのは、それぞれが必要とする依存(特にGUIのPySide6は数百MB)を
-混在させないため(開発・テスト向け)。venvをactivateせず普段使いの
-シェルからそのまま`narou-dl`を使いたい場合は`make install`を使う。
-Makefileを使わず直接インストールする場合は`pip install -e .`(CLI)/
-`pip install -e ".[gui]"`(GUI)でも構わない。
+混在させないため(開発・テスト向け)。`make app`は`.venv-app-build/`を
+毎回作り直してからビルドする(過去に手動でインストールした無関係な
+パッケージが残っていると、py2appのバイナリコピー処理と噛み合わず
+署名が壊れる不具合が実際にあったため、再現性を優先している)。
+venvをactivateせず普段使いのシェルからそのまま`narou-dl`を使いたい
+場合は`make install`を使う。Makefileを使わず直接インストールする場合は
+`pip install -e .`(CLI)/`pip install -e ".[gui]"`(GUI)でも構わない
+(PDF出力も使う場合は`.[pdf]`/`.[gui,pdf]`。`make setup-cli`等は
+既定でpdf extraを含める)。
 
 ## CLIの使い方
 
@@ -95,8 +100,8 @@ narou-dl N9669BK --save-config --sleep 2.0
 
 設定ファイルの既定値が`true`になっている項目を1回だけ元に戻したい場合は
 否定形のオプションを指定する。`--yoko`/`--emit-aozora-txt`/
-`--emit-aozora-txt-images`は`--no-yoko`のように`--no-`を付けた形、
-`--no-chapters`/`--no-images`はそれぞれ`--chapters`/`--images`
+`--emit-aozora-txt-images`/`--emit-pdf`は`--no-yoko`のように`--no-`を
+付けた形、`--no-chapters`/`--no-images`はそれぞれ`--chapters`/`--images`
 (二重否定`--no-no-chapters`にはしていない)。
 
 ### EPUB化バックエンド
@@ -119,6 +124,36 @@ narou-dl N9669BK --backend aozoraepub3 --device kindle  # デバイス最適化�
 narou-dl N9669BK --emit-aozora-txt
 narou-dl N9669BK --emit-aozora-txt --emit-aozora-txt-images  # 挿絵注記も含める
 ```
+
+### PDF出力
+
+同じ話データから縦書き(既定)/横書きのPDFも書き出せる。`--backend`の
+どちらとも併用できる。外部ツール(Calibre等)は使わず、
+`narou_dl/pdf_builder.py`が文字単位でマス目に配置するPure Python製の
+独自縦書き組版エンジンで、ReportLab組み込みの日本語CIDフォントのみで
+完結する(フォントファイルの同梱不要)。
+
+`make setup-cli`/`make setup-gui`/`make install`/`make app`はいずれも
+`reportlab`(pdf extra)を含めてインストールするため、追加作業なしで
+`--emit-pdf`が使える。
+
+```bash
+narou-dl N9669BK --emit-pdf
+```
+
+Makefileを使わず`pip install -e .`(pdf extra無し)で入れた場合は、
+プロジェクトルート(pyproject.tomlがある場所)で以下を実行する
+(narou-dlはPyPI未公開のため、`pip install "narou-dl[pdf]"`のように
+パッケージ名だけでは入らない点に注意):
+
+```bash
+pip install -e ".[pdf]"
+```
+
+ルビ・傍点・縦中横(数字の連続)・章区切り・挿絵(専用ページ)・簡易禁則処理に
+対応する。既知の制約として、括弧等の約物は縦書き用の回転グリフにはならず、
+半角英字・長音記号(ー)も直立のまま描画される(詳細は`pdf_builder.py`の
+モジュールdocstringを参照)。
 
 ### ライブラリ機能
 
@@ -154,6 +189,7 @@ make run-gui
 | 一括ダウンロード | ncode欄に1行1件で複数指定すると、順番に自動でダウンロードする(出力ファイル名は各作品とも自動生成)。進捗表示には現在取得中のncodeと、判明次第そのタイトルが添えて表示される |
 | キャンセル | ダウンロード中は「キャンセル」ボタンで中断できる(現在取得中の話の完了を待ってから止まる協調的キャンセル)。一括ダウンロード中にキャンセルすると残りのキューも実行されない |
 | バックエンド選択 | `ebooklib`(既定)/`aozoraepub3`をGUIから選択できる。`aozoraepub3`選択時は`.jar`パス・デバイス最適化オプションを指定できる。`ebooklib`選択時は`--emit-aozora-txt`相当のオプションも利用できる |
+| PDF出力 | 「縦書きPDFも生成する」にチェックすると`--emit-pdf`相当の縦書きPDF(Pure Python製の独自組版)も生成する。バックエンドの選択に関わらず利用できる |
 | 設定の保存 | 主要オプション(縦横・バックエンド設定等)は`~/.config/narou-dl/config.json`に保存され、次回起動時に復元される。CLIの`--save-config`と同じファイルを共有するため、どちらで変更してももう一方に反映される(詳細は「CLIの使い方」内の既定オプション保存の節を参照) |
 | ライブラリに登録 | ダウンロードタブの「この作品をライブラリに登録する」にチェックすると、CLIの`--library-add`と同様に今回のオプションと共に登録される |
 | Finderで表示 | ダウンロード完了ダイアログの「Finderで表示」ボタンから、生成したEPUB(一括ダウンロード時は出力フォルダ)をFinderで開ける |
@@ -182,14 +218,18 @@ make install-app INSTALL_DIR=~/Applications  # インストール先を変更す
 make uninstall-app                        # インストールしたアプリを削除する
 ```
 
-`make app`は専用の仮想環境`.venv-app-build/`を都度作り直してビルドする
-(汚染されていないクリーンな環境でないと、py2appが無関係なパッケージを
-巻き込んでサイズ増大や署名エラーの原因になるため)。内部では以下を行っている:
+`make app`は専用の仮想環境`.venv-app-build/`を毎回`rm -rf`してから
+作り直してビルドする(過去に手動でインストールした無関係なパッケージが
+残っていると、py2appのバイナリコピー処理と噛み合わず署名が壊れる不具合が
+実際にあったため、再現性を優先して常にクリーンな状態から始める)。
+内部では以下を行っている:
 
 ```bash
+rm -rf .venv-app-build
 python3 -m venv .venv-app-build
-.venv-app-build/bin/pip install .
+.venv-app-build/bin/pip install ".[pdf]"
 .venv-app-build/bin/pip install "PySide6>=6.5" py2app
+rm -rf build dist
 
 # setup.py はpy2app専用で、pyproject.tomlの[project]と併存すると
 # py2appが依存関係(install_requires)を検出してエラーになるため、
@@ -201,8 +241,14 @@ mv pyproject.toml.bak pyproject.toml
 .venv-app-build/bin/python scripts/trim_macos_bundle.py dist/narou-dl.app
 ```
 
-生成物は`dist/narou-dl.app`(中間ファイルは`build/`)。`make distclean`で
-`.venv-app-build/`ごと削除できる。
+`trim_macos_bundle.py`は上記の他、Qtプラグインの実際の配置場所を動的に
+検出してrpathを補正し、py2appのコピー処理で稀に破損する共有ライブラリ
+(同名の正常なコピーがバンドル内の別の場所にあれば、それで置き換えて修復する)
+の自動修復も行う。
+
+生成物は`dist/narou-dl.app`(中間ファイルは`build/`)。`make clean`で
+`build/`/`dist/`を削除でき(`make app`は次回実行時にこれも自動で行う)、
+`make distclean`で`.venv-app-build/`ごと削除できる。
 
 ## 仕組み
 
@@ -240,13 +286,18 @@ mv pyproject.toml.bak pyproject.toml
      `~/.config/narou-dl/config.json`に保存する
    - CLI(`--save-config`)・GUIのどちらから保存しても同じファイルを読み書きするため、
      設定が食い違わない
+7. **PDF出力** (`narou_dl/pdf_builder.py`)
+   - `--emit-pdf`指定時、EPUBと同じ話データ(Episode.paragraphs)から
+     ReportLab(組み込みの日本語CIDフォント)のみで縦書き/横書きPDFを生成する
+   - 外部ツールは使わず、文字単位でマス目に配置する独自の縦書き組版エンジン
+     (ルビ・傍点・縦中横・章区切り・挿絵ページ・簡易禁則処理に対応)
 
 ## テスト
 
 `scraper.py`(なろうのHTML構造への依存が強く、サイト側の変更で壊れやすい)を
-中心に、`cache.py`・`aozora.py`・`epub_builder.py`・`library.py`・`cli.py`の
-ユニットテストがある。実際のなろうサイトへは通信せず、固定HTMLやtmp_pathで
-完結する。
+中心に、`cache.py`・`aozora.py`・`epub_builder.py`・`library.py`・`config.py`・
+`pdf_builder.py`・`cli.py`のユニットテストがある。実際のなろうサイトへは
+通信せず、固定HTMLやtmp_pathで完結する。
 
 ```bash
 make test

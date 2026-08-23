@@ -34,6 +34,7 @@ LIBRARY_OPTION_KEYS = (
     "device",
     "emit_aozora_txt",
     "emit_aozora_txt_images",
+    "emit_pdf",
 )
 
 

@@ -18,9 +18,13 @@ dependencies = [
 docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",
+    "narou-dl[pdf]",
 ]
 gui = [
     "PySide6>=6.5",
+]
+pdf = [
+    "reportlab>=4.0",
 ]
 dev = [
     "pytest>=7.0",

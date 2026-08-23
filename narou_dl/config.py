@@ -31,6 +31,7 @@ CONFIG_KEYS = (
     "device",
     "emit_aozora_txt",
     "emit_aozora_txt_images",
+    "emit_pdf",
 )
 
 DEFAULTS: dict = {
@@ -43,6 +44,7 @@ DEFAULTS: dict = {
     "device": None,
     "emit_aozora_txt": False,
     "emit_aozora_txt_images": False,
+    "emit_pdf": False,
 }
 
 

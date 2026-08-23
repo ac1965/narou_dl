@@ -52,6 +52,7 @@ class DownloadOptions:
     device: str | None = None
     emit_aozora_txt: bool = False
     emit_aozora_txt_images: bool = False
+    emit_pdf: bool = False
     library_add: bool = False
 
 
@@ -209,6 +210,9 @@ class DownloadWorker(QThread):
             if args.emit_aozora_txt:
                 self._emit_aozora_txt(args, info, episodes, chapter_map, session, cache, output_path)
 
+        if args.emit_pdf:
+            self._emit_pdf(args, info, episodes, chapter_map, session, cache, output_path)
+
         self.log.emit("完了しました。")
 
         if args.library_add:
@@ -267,6 +271,27 @@ class DownloadWorker(QThread):
         txt_path = Path(output_path).with_suffix(".txt")
         txt_path.write_text(novel_text, encoding="utf-8")
         self.log.emit(f"  青空文庫記法テキストを書き出しました -> {txt_path}")
+
+    def _emit_pdf(self, args, info, episodes, chapter_map, session, cache, output_path) -> None:
+        try:
+            from ..pdf_builder import build_pdf
+        except ImportError as exc:
+            raise _WorkerAbort(
+                "--emit-pdfにはreportlabが必要です。プロジェクトルートで"
+                'pip install -e ".[pdf]" を実行してインストールしてください'
+            ) from exc
+        pdf_path = Path(output_path).with_suffix(".pdf")
+        self.log.emit(f"  縦書きPDFを生成中... -> {pdf_path}")
+        build_pdf(
+            info,
+            episodes,
+            str(pdf_path),
+            vertical=not args.yoko,
+            chapter_map=chapter_map,
+            embed_images=not args.no_images,
+            session=session,
+            disk_cache=cache,
+        )
 
     def _add_to_library(self, args, info) -> None:
         cache_dir = Path(args.cache_dir) if args.cache_dir else None

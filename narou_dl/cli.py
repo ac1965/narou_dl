@@ -331,6 +331,17 @@ def run(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--emit-pdf",
+        action=argparse.BooleanOptionalAction,
+        default=saved["emit_pdf"],
+        help=(
+            "EPUB(または青空文庫記法テキスト)と同じ話データから、独自の"
+            "縦書き組版エンジン(narou_dl/pdf_builder.py、外部ツール不要の"
+            "Pure Python実装)でPDFも書き出す。"
+            '要 pip install -e ".[pdf]" (プロジェクトルートで実行)'
+        ),
+    )
+    parser.add_argument(
         "--reveal",
         action="store_true",
         help=(
@@ -656,6 +667,30 @@ def _download_and_build(args: argparse.Namespace) -> int:
             txt_path = Path(output_path).with_suffix(".txt")
             txt_path.write_text(novel_text, encoding="utf-8")
             print(f"  青空文庫記法テキストを書き出しました -> {txt_path}")
+
+    if args.emit_pdf:
+        try:
+            from .pdf_builder import build_pdf
+        except ImportError:
+            print(
+                "[エラー] --emit-pdf にはreportlabが必要です。"
+                'プロジェクトルートで pip install -e ".[pdf]" を'
+                "実行してインストールしてください",
+                file=sys.stderr,
+            )
+            return 1
+        pdf_path = Path(output_path).with_suffix(".pdf")
+        print(f"  縦書きPDFを生成中... -> {pdf_path}")
+        build_pdf(
+            info,
+            episodes,
+            str(pdf_path),
+            vertical=not args.yoko,
+            chapter_map=chapter_map,
+            embed_images=not args.no_images,
+            session=session,
+            disk_cache=cache,
+        )
 
     if args.library_add:
         cache_dir = Path(args.cache_dir) if args.cache_dir else None

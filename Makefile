@@ -28,8 +28,8 @@ help:
 	@echo "make install    : narou-dlをpyenvのグローバル環境に直接インストールする(venv不要でどこからでも使える)"
 	@echo "make uninstall  : pyenvのグローバル環境からnarou-dlをアンインストールする"
 	@echo "make test       : pytestでテストスイートを実行する"
-	@echo "make clean      : リポジトリ内の一時ファイル(__pycache__・各種キャッシュディレクトリ)を削除する"
-	@echo "make distclean  : clean に加えて仮想環境・ビルド成果物・pyenvグローバルへのインストールも全て削除する"
+	@echo "make clean      : リポジトリ内の一時ファイル・ビルド成果物(build/dist含む)を削除する"
+	@echo "make distclean  : clean に加えて仮想環境・pyenvグローバルへのインストールも全て削除する"
 
 $(VENV_CLI)/bin/python:
 	$(PYTHON) -m venv $(VENV_CLI)
@@ -37,17 +37,14 @@ $(VENV_CLI)/bin/python:
 $(VENV_GUI)/bin/python:
 	$(PYTHON) -m venv $(VENV_GUI)
 
-$(VENV_APP)/bin/python:
-	$(PYTHON) -m venv $(VENV_APP)
-
 setup-cli: $(VENV_CLI)/bin/python
 	$(VENV_CLI)/bin/pip install --upgrade pip
-	$(VENV_CLI)/bin/pip install -e .
+	$(VENV_CLI)/bin/pip install -e ".[pdf]"
 	@echo "-> $(VENV_CLI)/bin/narou-dl"
 
 setup-gui: $(VENV_GUI)/bin/python
 	$(VENV_GUI)/bin/pip install --upgrade pip
-	$(VENV_GUI)/bin/pip install -e ".[gui]"
+	$(VENV_GUI)/bin/pip install -e ".[gui,pdf]"
 	@echo "-> $(VENV_GUI)/bin/narou-dl-gui"
 
 run: setup-cli
@@ -58,12 +55,18 @@ run-gui: setup-gui
 
 # --- macOS .appバンドル(py2app) ---
 #
+# .venv-app-buildは毎回rm -rfしてから作り直す(既存のまま使い回すと、
+# 過去に手動でpip installした無関係なパッケージが残ってしまうことがあり、
+# それがpy2appのバイナリコピー処理と噛み合わず.appの署名が壊れる不具合を
+# 実機で確認したため、再現性を優先して常にクリーンな状態から始める)。
 # pyproject.tomlの[project.dependencies]がpy2appのinstall_requires
 # チェックと衝突するため、ビルド中だけ一時的に退避する。ビルドの
 # 成否に関わらず必ず元に戻す(1行にまとめて1つのシェルで実行する)。
-app: $(VENV_APP)/bin/python
+app:
+	rm -rf $(VENV_APP)
+	$(PYTHON) -m venv $(VENV_APP)
 	$(VENV_APP)/bin/pip install --upgrade pip
-	$(VENV_APP)/bin/pip install .
+	$(VENV_APP)/bin/pip install ".[pdf]"
 	$(VENV_APP)/bin/pip install "PySide6>=6.5" py2app
 	rm -rf build dist
 	mv pyproject.toml pyproject.toml.bak; \
@@ -99,22 +102,22 @@ uninstall-app:
 # editableインストールする。
 install:
 	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -e .
+	$(PYTHON) -m pip install -e ".[pdf]"
 	@echo "-> narou-dl ($$($(PYTHON) -c 'import sys; print(sys.prefix)'))"
 
 uninstall:
 	-$(PYTHON) -m pip uninstall -y narou-dl
 
 test: $(VENV_CLI)/bin/python
-	$(VENV_CLI)/bin/pip install -e ".[dev]"
+	$(VENV_CLI)/bin/pip install -e ".[dev,pdf]"
 	$(VENV_CLI)/bin/pytest
 
 clean:
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 	find . -name "*.pyc" -delete
 	rm -rf .pytest_cache .mypy_cache .ruff_cache docs/_build
+	rm -rf build dist narou_dl.egg-info
 
 distclean: clean uninstall
 	rm -rf $(VENV_CLI) $(VENV_GUI) $(VENV_APP)
-	rm -rf build dist narou_dl.egg-info
 	rm -rf .narou-dl-cache

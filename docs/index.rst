@@ -64,6 +64,30 @@ narou_dl.cache
    :undoc-members:
    :show-inheritance:
 
+narou_dl.library
+------------------
+
+.. automodule:: narou_dl.library
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+narou_dl.config
+-----------------
+
+.. automodule:: narou_dl.config
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+narou_dl.pdf_builder
+----------------------
+
+.. automodule:: narou_dl.pdf_builder
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 narou_dl.cli
 -------------
 

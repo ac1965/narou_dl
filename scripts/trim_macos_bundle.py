@@ -58,8 +58,23 @@ REMOVE_TOOLS = {
 }
 # ソース同梱物(型スタブ・ドキュメント・ビルド用ヘッダ等、実行時には不要)
 REMOVE_DIRS_IN_PYSIDE6 = {"doc", "include", "glue", "typesystems", "scripts", "QtAsyncio"}
-# Qt/lib以外でまるごと不要なQtリソースディレクトリ
-REMOVE_QT_SUBDIRS = {"qml", "translations", "metatypes", "plugins", "libexec"}
+# Qt/lib以外でまるごと不要なQtリソースディレクトリ。
+# "plugins"は含めない: setup.pyの"qt_plugins"オプションで作られるコピーが
+# 常に別の場所(Contents/Resources/qt_plugins/)に retreat先を持つとは限らず、
+# ビルドによってはPySide6/Qt/plugins/自体が platforms/libqcocoa.dylib 等の
+# 唯一のコピー先になることを実機で確認した。ここを無条件削除すると
+# アプリが起動できなくなる("Could not find the Qt platform plugin cocoa")
+# ため、plugins配下は必要なサブディレクトリ(platforms/styles/imageformats)
+# だけを残す形で個別に整理する(REMOVE_QT_PLUGIN_SUBDIRS参照)。
+REMOVE_QT_SUBDIRS = {"qml", "translations", "metatypes", "libexec"}
+# Qt/plugins配下で不要なサブディレクトリ(platforms/styles/imageformatsは
+# setup.pyのqt_pluginsオプションと一致させて残す)
+REMOVE_QT_PLUGIN_SUBDIRS = {
+    "generic", "iconengines", "networkinformation", "position", "tls",
+    "sqldrivers", "qmltooling", "sensors", "sensorgestures", "geoservices",
+    "renderers", "sceneparsers", "texttospeech", "webview", "multimedia",
+    "canbus", "gamepads", "printsupport", "designer", "renderplugins",
+}
 
 
 def human_size(path: Path) -> str:
@@ -95,6 +110,12 @@ def trim(app_path: Path) -> None:
     for name in REMOVE_QT_SUBDIRS:
         remove(pyside_dir / "Qt" / name)
 
+    plugins_dir = pyside_dir / "Qt" / "plugins"
+    if plugins_dir.is_dir():
+        for entry in plugins_dir.iterdir():
+            if entry.name in REMOVE_QT_PLUGIN_SUBDIRS:
+                remove(entry)
+
     for so_file in pyside_dir.glob("*.abi3.so"):
         if so_file.name not in KEEP_ABI3:
             remove(so_file)
@@ -113,18 +134,19 @@ def trim(app_path: Path) -> None:
 
 
 def fix_plugin_rpaths(app_path: Path) -> None:
-    """qt_plugins配下のプラグイン(libqcocoa.dylib等)のrpathを修正する。
+    """Qtプラグイン(libqcocoa.dylib等)のrpathを修正する。
 
     py2appのpyside6レシピは、pipのPySide6パッケージ内 `Qt/plugins/platforms/`
     (rpath `@loader_path/../../lib` = 元のQt/lib を指す想定)にあった
-    プラグインを、そのまま `Contents/Resources/qt_plugins/platforms/` へ
-    コピーするだけでrpathを書き換えない。ディレクトリの深さが変わるため、
-    コピー後は同じ相対rpathが実際のフレームワーク(Contents/Resources/
-    lib/pythonX.Y/PySide6/Qt/lib)を指さなくなり、
-    "Could not find the Qt platform plugin 'cocoa'" で起動に失敗する
-    (py2app 0.28.10 + PySide6 6.11時点で確認済みの制約)。
-    実行ファイルの位置は変わらないため、@executable_path起点の
-    正しいrpathを追加で埋め込むことで解決する。
+    プラグインをコピーする際、コピー先のディレクトリ構成が変わっていても
+    rpathを書き換えない。ビルドによってコピー先が
+    `Contents/Resources/qt_plugins/platforms/`(元より2階層浅い→rpathが
+    実際のフレームワークを指さなくなる)だったり、PySide6パッケージ自身の
+    `Qt/plugins/platforms/`(元と同じ深さ→rpathはそのまま有効)だったりする
+    ことを実機で確認した(py2app 0.28.10 + PySide6 6.11時点、依存パッケージの
+    組み合わせによって変わる模様)。どちらの場合でも安全なように、
+    実行ファイルの位置を起点にした@executable_pathベースの正しいrpathを
+    無条件で追加する(既に有効なrpathがあっても実害は無い)。
     """
     pyside_dirs = list(app_path.glob("Contents/Resources/lib/python*/PySide6"))
     if not pyside_dirs:
@@ -132,7 +154,11 @@ def fix_plugin_rpaths(app_path: Path) -> None:
     py_dir_name = pyside_dirs[0].parent.name  # 例: "python3.10"
     correct_rpath = f"@executable_path/../Resources/lib/{py_dir_name}/PySide6/Qt/lib"
 
-    plugins_dir = app_path / "Contents" / "Resources" / "qt_plugins"
+    resources_dir = app_path / "Contents" / "Resources"
+    cocoa_plugins = list(resources_dir.rglob("platforms/libqcocoa.dylib"))
+    if not cocoa_plugins:
+        return
+    plugins_dir = cocoa_plugins[0].parent.parent  # .../platforms の親(imageformats等と同階層)
     for dylib in plugins_dir.rglob("*.dylib"):
         subprocess.run(
             ["install_name_tool", "-add_rpath", correct_rpath, str(dylib)],
@@ -151,9 +177,77 @@ def fix_plugin_rpaths(app_path: Path) -> None:
         )
 
 
+def _can_sign(path: Path) -> bool:
+    result = subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(path)],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def fix_corrupted_dylibs(app_path: Path) -> None:
+    """py2appのコピー処理でリライトされ、codesignが扱えなくなったdylibを修復する。
+
+    Pillow(reportlab/pdf extraの依存先)が同梱するliblzma.5.dylibのように、
+    py2appがインストール名を書き換える際にMach-Oの内部構造(既存の
+    LC_CODE_SIGNATUREのオフセット等)を壊してしまい、codesignは元より
+    ("--remove-signature"すら"internal error"で失敗する)、対象を
+    削除するとPillowのlibtiff経由の依存で`from PIL import Image`自体が
+    ImportErrorになる、という事例を実機で確認した(削除では直せず、
+    かといって直接re-signもできない)。
+
+    このアプリはビルド時に同じ共有ライブラリを複数箇所(例:
+    Contents/Frameworks/ と 各パッケージ内の.dylibs/)へ複製することが多く、
+    経験上どちらか一方だけが壊れ、もう一方は正常にコピーされることが
+    多い。そこで同じファイル名を持つdylib/soをバンドル全体から集め、
+    署名できるもの(正常な複製)が1つでもあれば、それで壊れている方を
+    上書きし、インストール名(-id)だけ元の値に戻してから署名し直す。
+    """
+    groups: dict[str, list[Path]] = {}
+    for path in app_path.rglob("*"):
+        if path.is_file() and (path.suffix == ".dylib" or path.suffix == ".so"):
+            groups.setdefault(path.name, []).append(path)
+
+    for name, paths in groups.items():
+        if len(paths) < 2:
+            continue
+        broken = [p for p in paths if not _can_sign(p)]
+        if not broken:
+            continue
+        healthy = [p for p in paths if p not in broken]
+        if not healthy:
+            print(f"  [警告] {name} の全コピーが破損しており自動修復できません: {paths}")
+            continue
+        source = healthy[0]
+        for target in broken:
+            original_id = subprocess.run(
+                ["otool", "-D", str(target)], capture_output=True, text=True, check=True
+            ).stdout.splitlines()[-1].strip()
+            print(f"  {target} を {source} の内容で修復します(-id={original_id})")
+            shutil.copyfile(source, target)
+            subprocess.run(["install_name_tool", "-id", original_id, str(target)], check=True)
+            subprocess.run(["codesign", "--force", "--sign", "-", str(target)], check=True)
+
+
 def resign(app_path: Path) -> None:
+    """.appバンドル全体にad-hoc署名を(再)付与する。
+
+    --deep を付けると、バンドル内の全Mach-Oバイナリを個別に検証・再署名
+    しようとする。しかしPillow(reportlab/pdf extraの依存先)が同梱する
+    liblzma.5.dylibのように、py2appがコピー時にリライトした結果
+    codesignの厳格な検証に通らないバイナリが1つでも混入していると、
+    "main executable failed strict validation" で失敗することを実機で
+    複数回確認した(Pillowが無いクリーンな環境でビルドすれば起きないが、
+    pdf extraを既定で含めるようにした以上、常に再現しうる)。
+    py2app自身の内部署名処理も実際には非再帰的(バンドル全体を1つの単位
+    として、ネストしたバイナリ個々は検証せずリソースのハッシュだけで
+    封印する)ため、それに倣って --deep を付けずに署名する。未署名のまま
+    残るネストしたdylibはmacOSの自動ad-hoc署名機構が実行時に補うため、
+    動作上の問題にはならない(codesign --verify --deep --strict による
+    事後検証は別途通ることを確認済み)。
+    """
     subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", str(app_path)],
+        ["codesign", "--force", "--sign", "-", str(app_path)],
         check=True,
     )
 
@@ -166,6 +260,7 @@ def main() -> None:
     before = human_size(app_path)
     trim(app_path)
     fix_plugin_rpaths(app_path)
+    fix_corrupted_dylibs(app_path)
     resign(app_path)
     after = human_size(app_path)
     print(f"{app_path}: {before} -> {after}")
