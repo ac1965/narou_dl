@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..cache import default_cache_dir
 from ..cli import extract_ncode
 from ..config import load_config, save_config
 from .cache_manager import CacheManagerWidget
@@ -75,7 +76,9 @@ class DownloadTab(QWidget):
 
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("省略時は作品タイトルから自動生成(複数ncode指定時は常に自動生成)")
+        self.output_edit.setPlaceholderText(
+            "省略時はキャッシュフォルダに作品タイトルから自動生成(複数ncode指定時は常に自動生成)"
+        )
         output_row.addWidget(self.output_edit)
         browse_btn = QPushButton("参照...")
         browse_btn.clicked.connect(self._browse_output)
@@ -222,7 +225,10 @@ class DownloadTab(QWidget):
         return result
 
     def _browse_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "出力先を選択", "", "EPUBファイル (*.epub)")
+        start_dir = self.output_edit.text().strip() or str(default_cache_dir())
+        path, _ = QFileDialog.getSaveFileName(
+            self, "出力先を選択", start_dir, "EPUBファイル (*.epub)"
+        )
         if path:
             self.output_edit.setText(path)
 

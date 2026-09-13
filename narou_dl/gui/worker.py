@@ -22,7 +22,7 @@ from PySide6.QtCore import QThread, Signal
 from ..api import NarouAPI, NarouAPIError, polite_sleep
 from ..aozora import build_novel_text
 from ..aozoraepub3_backend import AozoraEpub3Error, build_epub_via_aozoraepub3
-from ..cache import Cache
+from ..cache import Cache, default_cache_dir
 from ..cli import fetch_with_retry, sanitize_filename, _load_from_cache_if_fresh
 from ..epub_builder import build_epub
 from ..image_fetch import download_images_for_aozora
@@ -98,9 +98,9 @@ class DownloadWorker(QThread):
     def _download(self) -> str:
         args = self.options
 
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
         cache: Cache | None = None
         if not args.no_cache:
-            cache_dir = Path(args.cache_dir) if args.cache_dir else None
             cache = Cache(args.ncode, cache_dir=cache_dir)
             if args.clear_cache:
                 cache.clear()
@@ -188,7 +188,11 @@ class DownloadWorker(QThread):
             if Path(output_path).suffix.lower() != ".epub":
                 output_path += ".epub"
         else:
-            output_path = f"{sanitize_filename(info.title)}.epub"
+            # 未指定時はカレントディレクトリ(.appの起動方法次第で不定)
+            # ではなく、常に同じ場所になるキャッシュ先フォルダに保存する。
+            output_dir = cache_dir or default_cache_dir()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = str(output_dir / f"{sanitize_filename(info.title)}.epub")
 
         self.log.emit(
             f"EPUBを生成中... ({'横書き' if args.yoko else '縦書き'}) -> {output_path}"
