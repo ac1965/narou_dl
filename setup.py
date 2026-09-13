@@ -19,7 +19,17 @@ DATA_FILES: list[str] = []
 OPTIONS = {
     # PySide6アプリはargv_emulationと相性が悪いため無効化する
     "argv_emulation": False,
-    "packages": ["narou_dl"],
+    # playwrightは"packages"に入れてzip化せず実ディレクトリとして展開する
+    # 必要がある(既定のzip化だとplaywright/driver/node(Chromium起動用の
+    # node実行ファイル)がpython310.zipの中に閉じ込められ、サブプロセスと
+    # して実行できず"[Errno 20] Not a directory"で失敗することを確認済み)。
+    "packages": ["narou_dl", "playwright"],
+    # playwright._impl.__pyinstaller配下はPyInstaller向けのフックファイルで、
+    # ファイル名自体にドットを含む(例: hook-playwright.async_api.py)。
+    # "packages"指定によるmodulegraphの再帰探索がこれを不正なモジュール名
+    # として解決しようとしてImportErrorになるため除外する(py2appでは
+    # 未使用、実行時にも参照されない)。
+    "excludes": ["playwright._impl.__pyinstaller"],
     # py2app同梱のpyside6.pyレシピ(modulegraphがPySide6を検出すると
     # 自動適用される)に、必要なQtプラグインをここで指定して取得させる。
     # 未使用モジュールの"excludes"指定は無効(py2appはPySide6パッケージの
